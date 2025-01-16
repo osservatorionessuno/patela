@@ -668,6 +668,7 @@ pub fn backup_tor_keys_to_tpm(
     nv_handle: NvIndexHandle,
     nv_size: usize,
     relays: &[ResolvedRelayRecord],
+    pcr_indices: &[u8],
 ) -> anyhow::Result<()> {
     println!("Backing up Tor relay keys to TPM...");
 
@@ -676,7 +677,7 @@ pub fn backup_tor_keys_to_tpm(
     let mut padded_data = serialized;
     padded_data.resize(nv_size, 0);
 
-    nv_write_data(ctx, nv_handle, &padded_data)?;
+    nv_write_data_with_policy(ctx, nv_handle, &padded_data, pcr_indices)?;
 
     println!("Successfully backed up {} relay keys to TPM", relays.len());
     Ok(())
@@ -685,12 +686,12 @@ pub fn backup_tor_keys_to_tpm(
 pub fn restore_tor_keys_from_tpm(
     ctx: &mut TpmContext,
     nv_handle: NvIndexHandle,
-    _nv_size: usize,
     relays: &[ResolvedRelayRecord],
+    pcr_indices: &[u8],
 ) -> anyhow::Result<()> {
     println!("Restoring Tor relay keys from TPM");
 
-    let data = nv_read_data(ctx, nv_handle)?;
+    let data = nv_read_data_with_policy(ctx, nv_handle, pcr_indices)?;
     let restored_keys = deserialize_relay_keys(&data)?;
 
     // Restore family key to all relay key dirs

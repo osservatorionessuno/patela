@@ -11,7 +11,11 @@ use clap::clap_derive::Subcommand;
 use ipnetwork::IpNetwork;
 use patela_client::{
     api::{AuthChallenge, AuthRequest, build_client},
-    tpm::*,
+    tpm::{
+        DEFAULT_POLICY_PCRS, delete_nv_index, get_nv_index_handle, get_nv_index_handle_with_policy,
+        load_attestation_keys, load_attestation_sessions, nv_read_data, nv_read_data_with_policy,
+        nv_write_data, nv_write_data_with_policy, public_key_to_hex, resolve_attestation_challenge,
+    },
     *,
 };
 use patela_server::{NodeConfig, db::ResolvedRelayRecord};
@@ -21,7 +25,8 @@ use systemctl::SystemCtl;
 use tss_esapi::{
     Context, TctiNameConf,
     handles::SessionHandle,
-    structures::{EncryptedSecret, IdObject},
+    interface_types::algorithm::HashingAlgorithm,
+    structures::{EncryptedSecret, IdObject, PcrSelectionListBuilder, PcrSlot},
 };
 
 const AUTH_TIMEOUT: u64 = 15; // minutes
@@ -45,6 +50,33 @@ enum TpmCommands {
     NvWrite,
     /// Print TPM identity keys (EK, AK, AK Name) for database migration
     PrintKeys,
+    /// Read PCR values from the TPM
+    ReadPcr {
+        /// PCR indices to read (0-16), comma-separated. Defaults to all (0-16)
+        #[arg(long, short, value_delimiter = ',')]
+        pcrs: Option<Vec<u8>>,
+        /// Hash algorithm to use (sha1, sha256, sha384, sha512)
+        #[arg(long, default_value = "sha256")]
+        algorithm: String,
+    },
+    /// Write to NV-Memory protected by PCR policy
+    NvWritePolicy {
+        /// PCR indices for policy, comma-separated. Defaults to 7,12,13,14
+        #[arg(long, short, value_delimiter = ',')]
+        pcrs: Option<Vec<u8>>,
+    },
+    /// Read from NV-Memory protected by PCR policy
+    NvReadPolicy {
+        /// PCR indices for policy, comma-separated. Defaults to 7,12,13,14
+        #[arg(long, short, value_delimiter = ',')]
+        pcrs: Option<Vec<u8>>,
+    },
+    /// Delete NV index
+    NvDelete {
+        /// Delete the policy-protected NV index instead of the regular one
+        #[arg(long, action)]
+        policy: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -140,8 +172,8 @@ async fn cmd_start(
 
     let client = build_client(insecure).await?;
 
-    // Get NV handle, ensuring index is created if not existing
-    let (nv_handle, nv_size) = get_nv_index_handle(context)?;
+    // Get NV handle with PCR policy protection, ensuring index is created if not existing
+    let (nv_handle, nv_size) = get_nv_index_handle_with_policy(context, DEFAULT_POLICY_PCRS)?;
 
     // Get the AK name for the challenge
     let (_ak_pub, ak_name, _qualified_name) = context.read_public(ak_ecc)?;
@@ -398,7 +430,7 @@ async fn cmd_start(
 
     if !is_first_time && !skip_restore {
         println!("Fetch tor keys backup");
-        restore_tor_keys_from_tpm(context, nv_handle, nv_size, &relays)?;
+        restore_tor_keys_from_tpm(context, nv_handle, &relays, DEFAULT_POLICY_PCRS)?;
     }
 
     let systemctl = SystemCtl::default();
@@ -414,7 +446,7 @@ async fn cmd_start(
 
     tokio::time::sleep(Duration::from_secs(wait_seconds)).await;
 
-    backup_tor_keys_to_tpm(context, nv_handle, nv_size, &relays)?;
+    backup_tor_keys_to_tpm(context, nv_handle, nv_size, &relays, DEFAULT_POLICY_PCRS)?;
 
     Ok(())
 }
@@ -484,6 +516,97 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
             println!("  ak_public = '{}',", public_key_to_hex(&ak_public)?);
             println!("  ak_name = '{}'", hex::encode(ak_name.value()));
             println!("WHERE id = 1;");
+        }
+        TpmCommands::ReadPcr { pcrs, algorithm } => {
+            let hash_alg = match algorithm.to_lowercase().as_str() {
+                "sha1" => HashingAlgorithm::Sha1,
+                "sha256" => HashingAlgorithm::Sha256,
+                "sha384" => HashingAlgorithm::Sha384,
+                "sha512" => HashingAlgorithm::Sha512,
+                _ => anyhow::bail!(
+                    "Unsupported hash algorithm '{}'. Use: sha1, sha256, sha384, sha512",
+                    algorithm
+                ),
+            };
+
+            // Default to all PCRs (0-16) if none specified
+            let pcr_indices: Vec<u8> = pcrs.unwrap_or_else(|| (0..=16).collect());
+
+            // Validate PCR indices
+            for &idx in &pcr_indices {
+                if idx > 16 {
+                    anyhow::bail!("Invalid PCR index {}. PCR indices must be 0-16", idx);
+                }
+            }
+
+            // Convert indices to PcrSlot
+            let pcr_slots: Vec<PcrSlot> = pcr_indices
+                .iter()
+                .filter_map(|&idx| PcrSlot::try_from(idx as u32).ok())
+                .collect();
+
+            // Build PCR selection list
+            let pcr_selection_list = PcrSelectionListBuilder::new()
+                .with_selection(hash_alg, &pcr_slots)
+                .build()
+                .context("Failed to build PCR selection list")?;
+
+            // Read PCR values
+            let (_, _, pcr_data) = context
+                .pcr_read(pcr_selection_list)
+                .context("Failed to read PCR values")?;
+
+            println!("=== TPM PCR Values ({}) ===\n", algorithm.to_uppercase());
+
+            for (idx, digest) in pcr_indices.iter().zip(pcr_data.value().iter()) {
+                let digest_bytes = digest.as_bytes();
+                println!("PCR[{:2}]: {}", idx, hex::encode(digest_bytes));
+            }
+        }
+        TpmCommands::NvWritePolicy { pcrs } => {
+            let pcr_indices = pcrs.unwrap_or_else(|| DEFAULT_POLICY_PCRS.to_vec());
+
+            println!("=== NV Write with PCR Policy ===\n");
+            println!("Using PCRs: {:?}\n", pcr_indices);
+
+            let (nv_index_handle, size) = get_nv_index_handle_with_policy(context, &pcr_indices)?;
+
+            println!("NV index handle acquired, size: {}", size);
+
+            let plain_text = "A".repeat(size);
+            let bytes: Vec<u8> = plain_text.as_bytes().into();
+
+            nv_write_data_with_policy(context, nv_index_handle, &bytes, &pcr_indices)?;
+
+            println!("=== Data successfully written to TPM NV with PCR policy ===");
+        }
+        TpmCommands::NvReadPolicy { pcrs } => {
+            let pcr_indices = pcrs.unwrap_or_else(|| DEFAULT_POLICY_PCRS.to_vec());
+
+            println!("=== NV Read with PCR Policy ===\n");
+            println!("Using PCRs: {:?}\n", pcr_indices);
+
+            let (nv_index_handle, _size) = get_nv_index_handle_with_policy(context, &pcr_indices)?;
+
+            let bytes = nv_read_data_with_policy(context, nv_index_handle, &pcr_indices)?;
+            let text = std::str::from_utf8(&bytes)?;
+
+            println!("=== Read from TPM NV with PCR policy ===");
+            println!("Data: {}", text);
+        }
+        TpmCommands::NvDelete { policy } => {
+            if policy {
+                println!("=== Deleting policy-protected NV index (0x01000002) ===\n");
+                let (nv_index_handle, _) =
+                    get_nv_index_handle_with_policy(context, DEFAULT_POLICY_PCRS)?;
+                delete_nv_index(context, nv_index_handle)?;
+                println!("Policy-protected NV index deleted successfully");
+            } else {
+                println!("=== Deleting regular NV index (0x01000000) ===\n");
+                let (nv_index_handle, _) = get_nv_index_handle(context)?;
+                delete_nv_index(context, nv_index_handle)?;
+                println!("Regular NV index deleted successfully");
+            }
         }
     }
 
