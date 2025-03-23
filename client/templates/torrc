@@ -1,0 +1,18 @@
+
+Nickname {{ name }}
+
+ORPort {{ or_address_v4 }}:{{ or_port }}
+ORPort [{{ or_address_v6  }}]:{{ or_port }}
+
+RelayBandwidthRate {{ bandwidth_rate }} MB
+RelayBandwidthBurst {{ bandwidth_burst }} MB
+
+ContactInfo email:info[]osservatorionessuno.org url:https://osservatorionessuno.org proof:uri-rsa abuse:exit[]osservatorionessuno.org mastodon:https://mastodon.cisti.org/@0n_odv donationurl:https://osservatorionessuno.org/participate/ ciissversion:2
+
+MyFamily {{ family }}
+{% for rule in policy %}
+ExitPolicy {{ rule.verb | lower }} {{ rule.object}}
+{%- endfor %}
+
+ExitRelay 1
+IPv6Exit 1

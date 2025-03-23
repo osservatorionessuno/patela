@@ -1,0 +1,7 @@
+/target
+*.db
+*.db-shm
+*.db-wal
+certs
+.env
+NOTE.md

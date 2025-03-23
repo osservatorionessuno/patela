@@ -1,0 +1,46 @@
+[package]
+name = "patela-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+patela-server = { path = "../server" }
+anyhow = "1.0.95"
+clap = { version = "4.5.29", features = ["derive"] }
+flate2 = "1.0.35"
+lazy_static = "1.5.0"
+nftables = "0.6.1"
+reqwest = { version = "0.12.12", default-features = false, features = ["json", "rustls-tls"] }
+sysinfo = { version = "0.33.1", features = ["serde"] }
+systemctl = "0.4.0"
+tera = "1.20.0"
+tokio = { version = "1.43.0", features = ["full"] }
+tss-esapi = "7.6.0"
+rtnetlink = "0.14.1"
+nftnl = "0.7.0"
+futures = "0.3.31"
+netlink-packet-route = "0.19.0"
+netlink-packet-core = "0.7.0"
+netlink-proto = "0.11.5"
+ipnetwork = "0.21.1"
+etc-passwd = "0.2.2"
+actix-tls = "3.4.0"
+rustls-pemfile = "2.2.0"
+tar = "0.4.44"
+
+[build-dependencies]
+const-gen = "1.6.5"
+
+[package.metadata.deb]
+maintainer = "Osservatorio Nessuno <admin@osservatorionessuno.org>"
+copyright = "2025, Osservatorio Nessuno <admin@osservatorionessuno.org>"
+license-file = ["../LICENSE", "2"]
+extended-description = """\
+The agent for tor relay configuration.
+"""
+depends = "libtss2-dev"
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/patela-client", "usr/bin/", "755"],
+]
