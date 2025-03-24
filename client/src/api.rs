@@ -1,6 +1,10 @@
+use std::time::Duration;
+
 use reqwest::{Client, tls};
 
 use crate::{CLIENT_KEY_CERT, SERVER_CA};
+
+const SERVER_TIMEOUT_SEC: u64 = 5;
 
 pub async fn build_client() -> Result<Client, reqwest::Error> {
     let cert = reqwest::Certificate::from_pem(SERVER_CA)?;
@@ -15,5 +19,6 @@ pub async fn build_client() -> Result<Client, reqwest::Error> {
         .add_root_certificate(cert)
         .identity(client_key_cert)
         .https_only(true)
+        .timeout(Duration::from_secs(SERVER_TIMEOUT_SEC))
         .build()
 }

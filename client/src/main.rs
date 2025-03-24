@@ -1,6 +1,5 @@
 use std::{
     ffi::CString,
-    fmt::format,
     fs,
     net::{Ipv4Addr, Ipv6Addr},
     process::Command,
@@ -174,7 +173,7 @@ async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> 
     } else {
         println!("Configure network interfaces...\n");
 
-        let (connection, net_handle, _) = rtnetlink::new_connection().unwrap();
+        let (connection, net_handle, _) = rtnetlink::new_connection()?;
         tokio::spawn(connection);
 
         let interface_index = find_network_interface(&net_handle).await?;
@@ -194,8 +193,7 @@ async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> 
             )
             .await?;
 
-            let pid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name)).unwrap())
-                .unwrap()
+            let pid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
                 .unwrap()
                 .uid;
 
