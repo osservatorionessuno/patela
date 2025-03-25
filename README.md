@@ -258,3 +258,35 @@ laptop and run in a debian bookworm vm. The two glibc are incompatible but with
 zig you need just to run:
 
 `console cargo zigbuild --target x86_64-unknown-linux-gnu.2.36`
+
+To test with qemu/libvirt you can start with a virsh example in
+`misc/virsh.xml`, open the file and replace `YOUR_PATH` with a valid
+debian/linux kernel image and cpio, there is also a shared filesystem to mount
+the code directory inside the guest for dev. This setup assume also a couple of
+network interface, one for nat and the other for ip bindings.
+
+Some useful command:
+
+Attach to the console
+
+```console
+virsh -c qemu:///system console patela
+```
+
+Mount the host filesystem
+
+```console
+mount -t virtiofs /patela /mnt
+```
+
+Clear tpm from persistent setup
+
+```console
+/mnt/target/x86_64-unknown-linux-gnu/debug/patela-client --tpm2 /dev/tpmrm0 tpm clean-persistent
+```
+
+Run patela with the server on the host
+
+```console
+/mnt/target/x86_64-unknown-linux-gnu/debug/patela-client --server https://192.168.122.1:8020 --tpm2 /dev/tpmrm0
+```
