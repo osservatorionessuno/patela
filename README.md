@@ -238,19 +238,23 @@ For running a qemu/kvm you need some configurations:
 - TPM virtualization/passtrought: if you got a permission error on tpm creation
   look the permissions in the `/var/lib/swtpm-localca/`. They should match the
   `swtpm_{user, group}` parameter in `/etc/libvirt/qemu.conf`
-- Create a main network a dhcp server exposed: your server should be reachable on this network.
+- Create a main network a dhcp server exposed: your server should be reachable
+  on this network.
 - Create a second "isolated" network that will be used for test
-- Mount the working directory with `virtiofs` and than `mount -t /{your mount name} /mnt`
+- Mount the working directory with `virtiofs` and than `mount -t /{your mount
+name} /mnt`
 
-We deploy on a pre-build debian image, but we don't make any assumption, you just need some deps:
+We deploy on a pre-build debian image, but we don't make any assumption, you
+just need some deps:
 
 - `systemd`: handling with relay lifecicle
 - `dhcp`: a client for the first connection
 - `libtss2-dev`: tpm library
 
 If you need to compile for old libc version or other exotic triplet you shuld
-checkout [cargo zigbuild](https://github.com/rust-cross/cargo-zigbuild), is just amazing. In my use case I want to build the debug version on my archlinux laptop and run in a debian bookworm vm. The two glibc are incompatible but with zig you need just to run:
+checkout [cargo zigbuild](https://github.com/rust-cross/cargo-zigbuild), is
+just amazing. In my use case I want to build the debug version on my archlinux
+laptop and run in a debian bookworm vm. The two glibc are incompatible but with
+zig you need just to run:
 
-```console
-cargo zigbuild --target x86_64-unknown-linux-gnu.2.36
-```
+`console cargo zigbuild --target x86_64-unknown-linux-gnu.2.36`
