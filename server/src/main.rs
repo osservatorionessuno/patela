@@ -3,7 +3,7 @@ use actix_web::{
     App, FromRequest, HttpRequest, HttpResponse, HttpServer, Responder,
     dev::{Extensions, ServiceRequest},
     error::{ErrorNotFound, ErrorUnauthorized},
-    get, post,
+    get, middleware, post,
     rt::net::TcpStream,
     web::{self, Bytes, Data, Json, Path},
 };
@@ -369,6 +369,7 @@ async fn cmd_run(
                     .service(get_relay_data)
                     .service(post_relay_data),
             )
+            .wrap(middleware::Logger::new("%t %s %U"))
     })
     .on_connect(get_client_cert)
     .bind_rustls_0_23((host, port), config)?
