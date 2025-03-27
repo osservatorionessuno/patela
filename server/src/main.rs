@@ -90,12 +90,12 @@ async fn node_id_from_request(req: &HttpRequest, pub_key: PublicKey) -> anyhow::
 
 #[post("/create")]
 async fn create(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<impl Responder> {
-    // TODO: the client send a sha256 created from (primary id + public cert)
-
     let client_cert = req
         .conn_data::<CertificateDer<'static>>()
         .unwrap()
         .as_bytes();
+
+    // TODO: replace cert with public ek key of the tpm
     let cert_digest = digest(client_cert);
 
     Ok(Json(ApiNodeCreateResponse {
@@ -135,6 +135,76 @@ async fn auth(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<im
     let payload = token.to_base64().map_err(ErrorInternalServerError)?;
 
     Ok(HttpResponse::Ok().body(payload))
+}
+
+#[get("/node/key")]
+async fn get_node_key(
+    app: Data<PatelaServer>,
+    req: HttpRequest,
+) -> actix_web::Result<impl Responder> {
+    let node_id = node_id_from_request(&req, app.biscuit_root.public())
+        .await
+        .map_err(ErrorNotFound)?;
+
+    let (key, _) = get_node_key_and_nonce(&app.db, node_id)
+        .await
+        .map_err(ErrorNotFound)?;
+
+    let key = key.ok_or(ErrorNotFound("No key found"))?;
+
+    Ok(HttpResponse::Ok().body(key))
+}
+
+#[post("/node/key")]
+async fn post_node_key(
+    app: Data<PatelaServer>,
+    req: HttpRequest,
+    body: Bytes,
+) -> actix_web::Result<impl Responder> {
+    let node_id = node_id_from_request(&req, app.biscuit_root.public())
+        .await
+        .map_err(ErrorNotFound)?;
+
+    update_node_aes_key(&app.db, node_id, body.to_vec())
+        .await
+        .map_err(ErrorNotFound)?;
+
+    Ok(HttpResponse::Ok())
+}
+
+#[get("/node/nonce")]
+async fn get_node_nonce(
+    app: Data<PatelaServer>,
+    req: HttpRequest,
+) -> actix_web::Result<impl Responder> {
+    let node_id = node_id_from_request(&req, app.biscuit_root.public())
+        .await
+        .map_err(ErrorNotFound)?;
+
+    let (_, nonce) = get_node_key_and_nonce(&app.db, node_id)
+        .await
+        .map_err(ErrorNotFound)?;
+
+    let nonce = nonce.ok_or(ErrorNotFound("No nonce found"))?;
+
+    Ok(HttpResponse::Ok().body(nonce))
+}
+
+#[post("/node/nonce")]
+async fn post_node_nonce(
+    app: Data<PatelaServer>,
+    req: HttpRequest,
+    body: Bytes,
+) -> actix_web::Result<impl Responder> {
+    let node_id = node_id_from_request(&req, app.biscuit_root.public())
+        .await
+        .map_err(ErrorNotFound)?;
+
+    update_node_aes_nonce(&app.db, node_id, body.to_vec())
+        .await
+        .map_err(ErrorNotFound)?;
+
+    Ok(HttpResponse::Ok())
 }
 
 #[post("/specs")]
@@ -366,6 +436,10 @@ async fn cmd_run(
                     .wrap(HttpAuthentication::bearer(ok_validator))
                     .service(specs)
                     .service(relays)
+                    .service(get_node_key)
+                    .service(get_node_nonce)
+                    .service(post_node_key)
+                    .service(post_node_nonce)
                     .service(get_relay_data)
                     .service(post_relay_data),
             )
@@ -424,8 +498,6 @@ async fn main() -> anyhow::Result<()> {
                 for relay in get_relays(&pool, node.id).await? {
                     println!("\t{}\t\t{}\t{}", relay.name, relay.ip_v4, relay.ip_v6);
                 }
-
-                println!("");
             }
         }
         Commands::Remove { id } => {

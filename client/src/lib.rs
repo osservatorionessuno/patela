@@ -1,5 +1,16 @@
 include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
+use aes_gcm::{
+    AeadCore, Aes256Gcm, AesGcm, KeyInit,
+    aead::{
+        OsRng,
+        consts::{B0, B1},
+    },
+    aes::{
+        Aes256,
+        cipher::typenum::{UInt, UTerm},
+    },
+};
 use futures::TryStreamExt;
 use ipnetwork::IpNetwork;
 use lazy_static::lazy_static;
@@ -15,6 +26,7 @@ use nftnl::{
     nftnl_sys::libc,
 };
 use patela_server::{HwSpecs, HwSpecsNetwork, Network, TorRelayConf};
+use reqwest::Client;
 use std::{
     collections::BTreeMap,
     ffi::CStr,
@@ -23,7 +35,7 @@ use std::{
 };
 use sysinfo::{Networks, System};
 use tar::{Archive, Builder};
-use tera::{Context, Tera};
+use tera::Tera;
 
 pub mod api;
 pub mod tpm;
@@ -78,7 +90,7 @@ pub fn collect_specs() -> anyhow::Result<HwSpecs> {
 
 pub fn generate_torrc(conf: &TorRelayConf) -> anyhow::Result<String> {
     TEMPLATES
-        .render("torrc", &Context::from_serialize(&conf)?)
+        .render("torrc", &tera::Context::from_serialize(conf)?)
         .map_err(anyhow::Error::from)
 }
 
@@ -97,7 +109,7 @@ pub async fn find_network_interface(handle: &rtnetlink::Handle) -> anyhow::Resul
         for nla in msg.attributes.into_iter() {
             match nla {
                 LinkAttribute::IfName(name) => {
-                    println!("Found interface {} with name {:?})", msg.header.index, name);
+                    //println!("Found interface {} with name {:?})", msg.header.index, name);
 
                     // eth, eno, ens, enp, enx
                     if name.starts_with("e") {
@@ -115,7 +127,7 @@ pub async fn find_network_interface(handle: &rtnetlink::Handle) -> anyhow::Resul
         for nla in msg.attributes.into_iter() {
             match nla {
                 AddressAttribute::Address(addr) => {
-                    println!("Found addr {} for index {}", addr, msg.header.index);
+                    //println!("Found addr {} for index {}", addr, msg.header.index);
 
                     // remove from hashmap if there is an index, only on if ipv6
                     if addr.is_ipv4() {
@@ -156,12 +168,12 @@ pub async fn add_network_address(
 ///
 /// The iptables equivalents rules are:
 ///
-///     - `-A OUTPUT -m owner --uid-owner <process id> -j MARK --set-mark <mark id>`
-///     - `-A <network interface> -m mark --mark <mark id>/0xff -j SNAT --to-source <source ip>`
+/// `-A OUTPUT -m owner --uid-owner <process id> -j MARK --set-mark <mark id>`
+/// `-A <network interface> -m mark --mark <mark id>/0xff -j SNAT --to-source <source ip>`
 ///
 /// Traslated to nftables:
-///     - `add rule ip filter OUTPUT skuid <process id> counter meta mark set <mark id>`
-///     - `add rule ip filter <interface> mark and 0xff == <mark id> counter snat to <source ip>`
+/// `add rule ip filter OUTPUT skuid <process id> counter meta mark set <mark id>`
+/// `add rule ip filter <interface> mark and 0xff == <mark id> counter snat to <source ip>`
 pub fn set_source_ip_by_process(
     iface_index: u32,
     pid: u32,
@@ -240,7 +252,10 @@ pub fn set_source_ip_by_process(
 pub fn backup_tor_keys(name: &str) -> anyhow::Result<Vec<u8>> {
     let mut archive = Builder::new(Vec::new());
 
-    archive.append_path(Path::new(&TOR_INSTANCE_LIB_DIR).join(name).join("keys/"))?;
+    archive.append_dir_all(
+        ".",
+        Path::new(&TOR_INSTANCE_LIB_DIR).join(name).join("keys/"),
+    )?;
 
     Ok(archive.into_inner()?)
 }
@@ -251,6 +266,82 @@ pub fn restore_tor_keys(name: &str, data: &[u8]) -> anyhow::Result<()> {
     archive
         .unpack(Path::new(&TOR_INSTANCE_LIB_DIR).join(name).join("keys/"))
         .map_err(anyhow::Error::from)
+}
+
+// Generate aes-gcp key from os random and a one-time nonce that should be renovated each time, the
+// key is stored encrypted on the server
+pub async fn generate_aes_cipher_and_store(
+    tpm_ctx: &mut tss_esapi::Context,
+    client: &Client,
+    server_url: &str,
+    session_token: &str,
+) -> anyhow::Result<(
+    AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>,
+    [u8; 12],
+)> {
+    // Generate key random
+    let key = Aes256Gcm::generate_key(OsRng);
+
+    // The nonce should be used only once and shared
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+
+    // encrypt the aes key with tpm
+    let ciphered_key = tpm::encrypt(tpm_ctx, key.to_vec());
+
+    let _ = client
+        .post(format!("{}/private/node/key", server_url))
+        .bearer_auth(session_token)
+        .body(ciphered_key)
+        .send()
+        .await?;
+
+    let _ = client
+        .post(format!("{}/private/node/nonce", server_url))
+        .bearer_auth(session_token)
+        .body(nonce.to_vec())
+        .send()
+        .await?;
+
+    let cipher = Aes256Gcm::new(&key);
+
+    Ok((cipher, nonce.into()))
+}
+
+// Fetch aes-gcp key and nonce from server, encrypt with the tpm before storing
+pub async fn fetch_aes_key(
+    tpm_ctx: &mut tss_esapi::Context,
+    client: &Client,
+    server_url: &str,
+    session_token: &str,
+) -> anyhow::Result<(
+    AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>,
+    [u8; 12],
+)> {
+    let ciphered_key = client
+        .get(format!("{}/private/node/key", server_url))
+        .bearer_auth(session_token)
+        .send()
+        .await?
+        .bytes()
+        .await?;
+
+    let nonce: Vec<u8> = client
+        .get(format!("{}/private/node/nonce", server_url))
+        .bearer_auth(session_token)
+        .send()
+        .await?
+        .bytes()
+        .await?
+        .into();
+
+    // decrypt aes key with tpm
+    let key = tpm::decrypt(tpm_ctx, ciphered_key.into());
+
+    let cipher = Aes256Gcm::new(key.as_slice().into());
+
+    let nonce_array: [u8; 12] = nonce.as_slice().try_into()?;
+
+    Ok((cipher, nonce_array))
 }
 
 #[cfg(test)]

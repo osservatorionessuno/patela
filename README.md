@@ -290,3 +290,9 @@ Run patela with the server on the host
 ```console
 /mnt/target/x86_64-unknown-linux-gnu/debug/patela-client --server https://192.168.122.1:8020 --tpm2 /dev/tpmrm0
 ```
+
+If you need to remove all ip address from interface for dev
+
+```console
+ip addr flush <DEV>
+```

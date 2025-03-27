@@ -1,7 +1,5 @@
-/*
-* This file is heavily inspired/copied from https://github.com/parallaxsecond/rust-tss-esapi
- */
-
+use aes_gcm::aead::{Aead, OsRng};
+use aes_gcm::{AeadCore, Aes256Gcm, KeyInit};
 use tss_esapi::constants::{CapabilityType, tss::TPM2_PERSISTENT_FIRST};
 use tss_esapi::handles::{ObjectHandle, PersistentTpmHandle, TpmHandle};
 use tss_esapi::interface_types::dynamic_handles::Persistent;
@@ -20,11 +18,10 @@ use tss_esapi::{
     interface_types::{algorithm::HashingAlgorithm, resource_handles::Hierarchy},
 };
 
-use std::convert::{TryFrom, TryInto};
-
-pub const IV: [u8; 16] = [
-    188, 144, 53, 87, 189, 188, 155, 229, 226, 213, 117, 121, 51, 244, 175, 89,
-];
+use std::{
+    convert::{TryFrom, TryInto},
+    str::from_utf8,
+};
 
 pub fn get_persistent_handler() -> PersistentTpmHandle {
     // Create persistent TPM handle with
@@ -148,10 +145,6 @@ pub fn encrypt(context: &mut Context, plain_text: Vec<u8>) -> Vec<u8> {
     // to load that public component into a TPM and then encrypt to it.
     let encrypted_data = context
         .execute_with_nullauth_session(|ctx| {
-            //let rsa_pub_key = ctx
-            //    .load_external_public(encrypt_key.out_public.clone(), Hierarchy::Null)
-            //    .unwrap();
-            //
             ctx.rsa_encrypt(
                 encrypt_primary,
                 data_to_encrypt.clone(),
@@ -180,4 +173,39 @@ pub fn decrypt(context: &mut Context, cypher_text: Vec<u8>) -> Vec<u8> {
         .unwrap();
 
     decrypted_data.value().to_vec()
+}
+
+pub fn test_aes_gcm(context: &mut Context) {
+    // Generate key random
+    let key = Aes256Gcm::generate_key(OsRng);
+    let cipher = Aes256Gcm::new(&key);
+
+    // The nonce should be shared
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let parsed = nonce.to_vec();
+
+    // encrypt message
+    let plain_text = "miao miao".as_bytes().to_vec();
+    let ciphered_msg = cipher.encrypt(&nonce, plain_text.as_ref()).unwrap();
+
+    // encrypt the aes key with tpm
+    let ciphered_key = encrypt(context, key.to_vec());
+
+    // write down the encrypted key to fs
+    let _ = std::fs::write("encrypted.key", ciphered_key);
+
+    // read encrypted key from fs
+    let encrypted_data = std::fs::read("encrypted.key").unwrap();
+
+    // decrypt aes key with tpm
+    let decrypted_key = decrypt(context, encrypted_data);
+
+    // create new cipher from
+    let cipher_2 = Aes256Gcm::new(decrypted_key.as_slice().into());
+    let nonce_array: [u8; 12] = parsed.try_into().unwrap();
+    let original_msg = cipher_2
+        .decrypt(&nonce_array.into(), ciphered_msg.as_slice())
+        .unwrap();
+
+    println!("Original message: {}", from_utf8(&original_msg).unwrap());
 }

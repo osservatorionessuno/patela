@@ -73,6 +73,69 @@ SELECT id, cert, first_seen, last_seen FROM nodes
     Ok(res)
 }
 
+pub async fn get_node_key_and_nonce(
+    pool: &SqlitePool,
+    node_id: i64,
+) -> anyhow::Result<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+    let mut conn = pool.acquire().await?;
+
+    let res = sqlx::query!(
+        r#"
+SELECT aes_key, aes_nonce FROM nodes
+WHERE id = ?
+        "#,
+        node_id
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    Ok((res.aes_key, res.aes_nonce))
+}
+
+pub async fn update_node_aes_key(
+    pool: &SqlitePool,
+    node_id: i64,
+    data: Vec<u8>,
+) -> anyhow::Result<()> {
+    let mut conn = pool.acquire().await?;
+
+    let _ = sqlx::query!(
+        r#"
+UPDATE nodes
+SET aes_key = (?2)
+WHERE id = (?1)
+        "#,
+        node_id,
+        data
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn update_node_aes_nonce(
+    pool: &SqlitePool,
+    node_id: i64,
+    data: Vec<u8>,
+) -> anyhow::Result<()> {
+    let mut conn = pool.acquire().await?;
+
+    let _ = sqlx::query!(
+        r#"
+UPDATE nodes
+SET aes_nonce = (?2)
+WHERE id = (?1)
+        "#,
+        node_id,
+        data
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn remove_node(pool: &SqlitePool, id: i64) -> anyhow::Result<i64> {
     let mut conn = pool.acquire().await?;
 
