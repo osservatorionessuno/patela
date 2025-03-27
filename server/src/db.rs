@@ -1,26 +1,26 @@
+use crate::HwSpecs;
+use chrono::Local;
+use sqlx::SqlitePool;
 use std::{
     net::{Ipv4Addr, Ipv6Addr},
     str::FromStr,
 };
 
-use chrono::Local;
 /// What in the db? Why the db?
 ///
 /// - list of valid relay names
 /// - assigned ip to relay
 /// - relay by public key
 /// - relay specs
-/// - encrypted blob from the relay
+/// - encrypted bkp from the relay
+/// - encrypted bkp keys and nonce from the relay
 ///
 /// For our need the db could be a very simple fs/file db, probably we don't need to do real sql
 /// query, but the life is to short to learn another db? A valid alternative could be to have an fs
 /// db with all the configuration and just file blobs dropped around.
-use sqlx::SqlitePool;
-
-use crate::HwSpecs;
-
+///
 const FIRST_IP_4: Ipv4Addr = Ipv4Addr::new(4, 190, 76, 100);
-const FIRST_IP_6: Ipv6Addr = Ipv6Addr::new(0x2001, 0x67c, 0xe28, 0x1, 0, 0, 0, 0x2);
+const FIRST_IP_6: Ipv6Addr = Ipv6Addr::new(0x2001, 0x67c, 0xe28, 0x1, 0, 0, 0, 0x100);
 
 #[derive(Debug)]
 pub struct NodeRecord {

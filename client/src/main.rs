@@ -14,15 +14,16 @@ use clap::clap_derive::Subcommand;
 use etc_passwd::Passwd;
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use patela_client::{api::build_client, tpm::*, *};
-use patela_server::{TorRelayConf, api::ApiNodeCreateResponse};
+use patela_server::api::{ApiNodeCreateResponse, ApiRelaysResponse};
 use systemctl::SystemCtl;
 use tar::Archive;
 use tss_esapi::{Context, TctiNameConf, handles::KeyHandle, tcti_ldr::DeviceConfig};
 
 #[derive(Subcommand, Debug, Clone)]
 enum NetCommands {
-    List,
     Add,
+    List,
+    Route,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -156,27 +157,27 @@ async fn cmd_start(
     println!("Push collected specs {:?}\n", specs);
 
     // Get system configuration in response of hw specs
-    let _system_conf = client
+    client
         .post(format!("{}/private/specs", server_url))
         .bearer_auth(&session_token)
         .json(&specs)
         .send()
-        //.await?
-        //.json::<ApiNodeSpecsResponse>()
         .await?
         .error_for_status()?;
 
     println!("Fetch relays conf");
 
     // Get tor relay conf
-    let relays = client
+    let tor_conf = client
         .get(format!("{}/private/relays", server_url))
         .bearer_auth(&session_token)
         .send()
         .await?
         .error_for_status()?
-        .json::<Vec<TorRelayConf>>()
+        .json::<ApiRelaysResponse>()
         .await?;
+
+    let relays = tor_conf.relays;
 
     for relay in relays.iter() {
         println!("{}", relay);
@@ -211,16 +212,23 @@ async fn cmd_start(
         let interface_index = find_network_interface(&net_handle).await?;
 
         for relay in relays.iter() {
-            // TODO: remove hardcoded previx
             add_network_address(
                 interface_index,
-                Ipv4Network::new(Ipv4Addr::from_str(&relay.or_address_v4)?, 24)?.into(),
+                Ipv4Network::new(
+                    Ipv4Addr::from_str(&relay.or_address_v4)?,
+                    tor_conf.network.ipv4_prefix,
+                )?
+                .into(),
                 &net_handle,
             )
             .await?;
             add_network_address(
                 interface_index,
-                Ipv6Network::new(Ipv6Addr::from_str(&relay.or_address_v6)?, 48)?.into(),
+                Ipv6Network::new(
+                    Ipv6Addr::from_str(&relay.or_address_v6)?,
+                    tor_conf.network.ipv6_prefix,
+                )?
+                .into(),
                 &net_handle,
             )
             .await?;
@@ -353,10 +361,13 @@ async fn cmd_net(config: NetCommands) -> anyhow::Result<()> {
     tokio::spawn(connection);
 
     match config {
+        NetCommands::Add => {}
         NetCommands::List => {
             let _ = find_network_interface(&handle).await.unwrap();
         }
-        NetCommands::Add => {}
+        NetCommands::Route => {
+            add_default_route_v4(Ipv4Addr::from_str("192.168.122.1")?, &handle).await?;
+        }
     }
 
     Ok(())

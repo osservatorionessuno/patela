@@ -1,6 +1,7 @@
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::{
-    cmp,
+    cmp, env,
     fmt::{self, Display},
 };
 
@@ -9,6 +10,14 @@ pub mod db;
 
 const RELAY_MEMORY_BOUND: u64 = 700;
 pub const RELAY_OR_PORT: u16 = 9001;
+
+lazy_static! {
+    pub static ref GATEWAY_V4: String = env::var("PATELA_GATEWAY_V4").unwrap();
+    pub static ref GATEWAY_V6: String = env::var("PATELA_GATEWAY_V6").unwrap();
+    pub static ref PREFIX_V4: u8 = env::var("PATELA_PREFIX_V4").unwrap().parse().unwrap();
+    pub static ref PREFIX_V6: u8 = env::var("PATELA_PREFIX_V6").unwrap().parse().unwrap();
+    pub static ref DNS_SERVER: String = env::var("PATELA_DNS_SERVER").unwrap();
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TorPolicyVerb {
@@ -51,8 +60,10 @@ impl Display for TorRelayConf {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NetworkConf {
     pub ipv4_gateway: String,
+    pub ipv4_prefix: u8,
     pub ipv6_gateway: String,
-    pub dns_server: Option<String>,
+    pub ipv6_prefix: u8,
+    pub dns_server: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

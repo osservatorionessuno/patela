@@ -13,6 +13,7 @@ chrono = "0.4.39"
 clap = { version = "4.5.30", features = ["env"] }
 clap-verbosity-flag = "3.0.2"
 env_logger = "0.11.6"
+lazy_static = "1.5.0"
 log = "0.4.26"
 rustls = "0.23.23"
 rustls-pemfile = "2.2.0"

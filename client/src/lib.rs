@@ -14,11 +14,6 @@ use aes_gcm::{
 use futures::TryStreamExt;
 use ipnetwork::IpNetwork;
 use lazy_static::lazy_static;
-use netlink_packet_route::{
-    AddressFamily,
-    address::AddressAttribute,
-    link::{LinkAttribute, LinkExtentMask},
-};
 use nftnl::{
     Batch, Chain, ProtoFamily, Rule, Table,
     expr::{Immediate, Nat, NatType, Register},
@@ -27,6 +22,14 @@ use nftnl::{
 };
 use patela_server::{HwSpecs, HwSpecsNetwork, Network, TorRelayConf};
 use reqwest::Client;
+use rtnetlink::{
+    RouteMessageBuilder,
+    packet_route::{
+        AddressFamily,
+        address::AddressAttribute,
+        link::{LinkAttribute, LinkExtentMask},
+    },
+};
 use std::{
     collections::BTreeMap,
     ffi::CStr,
@@ -144,6 +147,55 @@ pub async fn find_network_interface(handle: &rtnetlink::Handle) -> anyhow::Resul
     }
 
     anyhow::bail!("Impossible to find a valid network interface")
+}
+
+pub async fn add_default_route_v4(
+    gateway: Ipv4Addr,
+    handle: &rtnetlink::Handle,
+) -> anyhow::Result<()> {
+    // delete default route if exist
+    let route = RouteMessageBuilder::<Ipv4Addr>::new().build();
+    let mut routes = handle.route().get(route).execute();
+
+    while let Some(route) = routes.try_next().await? {
+        if route.header.destination_prefix_length == 0 {
+            println!("Found default route: {:?}", route);
+            handle.route().del(route).execute().await?;
+        }
+    }
+
+    let route = RouteMessageBuilder::<Ipv4Addr>::new()
+        .gateway(gateway)
+        .build();
+
+    handle.route().add(route).execute().await?;
+
+    Ok(())
+}
+
+pub async fn add_default_route_v6(
+    gateway: Ipv6Addr,
+    handle: &rtnetlink::Handle,
+) -> anyhow::Result<()> {
+    // delete default route if exist
+    let route = RouteMessageBuilder::<Ipv6Addr>::new().build();
+    let mut routes = handle.route().get(route).execute();
+
+    while let Some(route) = routes.try_next().await? {
+        if route.header.destination_prefix_length == 0 {
+            println!("Found default route: {:?}", route);
+            handle.route().del(route).execute().await?;
+        }
+    }
+
+    // add default ipv4 route
+    let route = RouteMessageBuilder::<Ipv6Addr>::new()
+        .gateway(gateway)
+        .build();
+
+    handle.route().add(route).execute().await?;
+
+    Ok(())
 }
 
 pub async fn add_network_address(
@@ -365,7 +417,7 @@ RelayBandwidthBurst 100 MB
 
 ContactInfo email:info[]osservatorionessuno.org url:https://osservatorionessuno.org proof:uri-rsa abuse:exit[]osservatorionessuno.org mastodon:https://mastodon.cisti.org/@0n_odv donationurl:https://osservatorionessuno.org/participate/ ciissversion:2
 
-MyFamily adadadads
+MyFamily one two three
 
 ExitPolicy reject 0.0.0.0/8:*
 ExitPolicy reject 169.254.0.0/16:*
@@ -381,7 +433,7 @@ IPv6Exit 1
     fn test_generate_torrc() {
         let tor_conf = TorRelayConf {
             name: String::from("miaomiao"),
-            family: String::from("adadadads"),
+            family: String::from("one two three"),
             or_address_v4: String::from("0.0.0.0"),
             or_address_v6: String::from("0.0.0.0"),
             or_port: 9001,

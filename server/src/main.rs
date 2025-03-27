@@ -312,7 +312,16 @@ async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<
         })
         .collect::<Vec<TorRelayConf>>();
 
-    Ok(Json(relays_conf))
+    Ok(Json(ApiRelaysResponse {
+        network: NetworkConf {
+            ipv4_gateway: GATEWAY_V4.to_string(),
+            ipv4_prefix: *PREFIX_V4,
+            ipv6_gateway: GATEWAY_V6.to_string(),
+            ipv6_prefix: *PREFIX_V6,
+            dns_server: DNS_SERVER.to_string(),
+        },
+        relays: relays_conf,
+    }))
 }
 
 #[get("/relays/data/{name}")]
