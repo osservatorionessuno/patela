@@ -6,7 +6,6 @@ use std::{
 
 pub mod api;
 pub mod db;
-pub mod tpm;
 
 const RELAY_MEMORY_BOUND: u64 = 700;
 pub const RELAY_OR_PORT: u16 = 9001;
