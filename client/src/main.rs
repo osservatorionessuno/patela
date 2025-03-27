@@ -2,11 +2,13 @@ use std::{
     ffi::CString,
     fs,
     net::{Ipv4Addr, Ipv6Addr},
+    path::Path,
     process::Command,
     str::FromStr,
     time::Duration,
 };
 
+use aes_gcm::aead::Aead;
 use clap::Parser;
 use clap::clap_derive::Subcommand;
 use etc_passwd::Passwd;
@@ -14,7 +16,7 @@ use ipnetwork::{Ipv4Network, Ipv6Network};
 use patela_client::{api::build_client, tpm::*, *};
 use patela_server::{TorRelayConf, api::ApiNodeCreateResponse};
 use systemctl::SystemCtl;
-use tokio::time::sleep;
+use tar::Archive;
 use tss_esapi::{Context, TctiNameConf, handles::KeyHandle, tcti_ldr::DeviceConfig};
 
 #[derive(Subcommand, Debug, Clone)]
@@ -30,13 +32,16 @@ enum TpmCommands {
     CreatePrimary,
     Encrypt,
     Decrypt,
+    Test,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
     Start {
-        #[arg(long, short, action, help = "Do not run network setup")]
+        #[arg(long, action, help = "Do not run network setup")]
         skip_net: bool,
+        #[arg(long, action, help = "Do not try to restore backup from server")]
+        skip_backup: bool,
     },
     /// Mainly for development and basic maintenances
     Tpm {
@@ -68,15 +73,26 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Starting patela...");
 
-    match config.cmd.unwrap_or(Commands::Start { skip_net: false }) {
-        Commands::Start { skip_net } => cmd_start(config.server, config.tpm2, skip_net).await,
-        Commands::Tpm { cmd } => cmd_tpm(cmd).await,
+    match config.cmd.unwrap_or(Commands::Start {
+        skip_net: false,
+        skip_backup: false,
+    }) {
+        Commands::Start {
+            skip_net,
+            skip_backup,
+        } => cmd_start(config.server, config.tpm2, skip_net, skip_backup).await,
+        Commands::Tpm { cmd } => cmd_tpm(cmd, config.tpm2).await,
         Commands::Net { cmd } => cmd_net(cmd).await,
     }
 }
 
 // Yes this is big, but that's life
-async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> anyhow::Result<()> {
+async fn cmd_start(
+    server_url: String,
+    tpm2: Option<String>,
+    skip_net: bool,
+    skip_backup: bool,
+) -> anyhow::Result<()> {
     let tpm_device_name = match tpm2 {
         Some(device) => TctiNameConf::Device(DeviceConfig::from_str(&device)?),
         None => TctiNameConf::from_environment_variable()?,
@@ -104,6 +120,7 @@ async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> 
             .post(format!("{}/public/create", server_url))
             .send()
             .await?
+            .error_for_status()?
             .json::<ApiNodeCreateResponse>()
             .await?;
 
@@ -115,10 +132,23 @@ async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> 
         .get(format!("{}/public/auth", server_url))
         .send()
         .await?
+        .error_for_status()?
         .text()
         .await?;
 
     println!("Succesfuly authenticathed with server");
+
+    // Generate or fetch aes key and nonce
+    let (cipher, nonce) = match is_first_run {
+        true => {
+            println!("Generate aes-gcm key and nonce for bkp encryption...");
+            generate_aes_cipher_and_store(context, &client, &server_url, &session_token).await
+        }
+        false => {
+            println!("Restore encrypted aes-gcm key and nonce from server...");
+            fetch_aes_key(context, &client, &server_url, &session_token).await
+        }
+    }?;
 
     // Configuration are send in any case
     let specs = collect_specs()?;
@@ -131,9 +161,10 @@ async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> 
         .bearer_auth(&session_token)
         .json(&specs)
         .send()
-        //.await? // TODO: ssh keys
+        //.await?
         //.json::<ApiNodeSpecsResponse>()
-        .await?;
+        .await?
+        .error_for_status()?;
 
     println!("Fetch relays conf");
 
@@ -143,6 +174,7 @@ async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> 
         .bearer_auth(&session_token)
         .send()
         .await?
+        .error_for_status()?
         .json::<Vec<TorRelayConf>>()
         .await?;
 
@@ -150,7 +182,7 @@ async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> 
         println!("{}", relay);
     }
 
-    println!("Configure relays...\n");
+    println!("\n\nConfigure relays...");
 
     for relay in relays.iter() {
         println!("Configure tor relay {}", relay.name);
@@ -161,7 +193,7 @@ async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> 
             .args(["/usr/sbin/tor-instance-create", &relay.name])
             .status()?;
 
-        let conf_file = generate_torrc(&relay)?;
+        let conf_file = generate_torrc(relay)?;
         fs::write(
             format!("/etc/tor/instances/{}/torrc", relay.name),
             conf_file,
@@ -193,47 +225,59 @@ async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> 
             )
             .await?;
 
-            let pid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
+            let uid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
                 .unwrap()
                 .uid;
 
-            println!("Configure source ips for pid {}:", relay.name);
-            println!("\t{}:", relay.or_address_v4);
-            println!("\t{}:", relay.or_address_v6);
+            println!("Configure source ips for uid {}:", relay.name);
+            println!("\t{}", relay.or_address_v4);
+            println!("\t{}", relay.or_address_v6);
 
             set_source_ip_by_process(
                 interface_index,
-                pid,
+                uid,
                 Ipv4Addr::from_str(relay.or_address_v4.as_ref())?,
                 Ipv6Addr::from_str(relay.or_address_v6.as_ref())?,
             )?;
         }
     }
 
-    if !is_first_run {
+    if !is_first_run && !skip_backup {
         println!("Fetch tor keys backup");
 
         for relay in relays.iter() {
             // Get tor relay conf
-            let data = client
+            let data: Vec<u8> = client
                 .get(format!("{}/private/relays/data/{}", server_url, relay.name))
                 .bearer_auth(&session_token)
                 .send()
                 .await?
-                .json::<Vec<u8>>()
-                .await?;
+                .error_for_status()?
+                .bytes()
+                .await?
+                .into();
 
-            let _relay_bkp = decrypt(context, data);
+            let archive_bkp = cipher.decrypt(&nonce.into(), data.as_slice()).unwrap();
 
             println!("Put keys in place");
 
-            // TODO:
+            let mut archive_bkp = Archive::new(archive_bkp.as_slice());
+            archive_bkp.set_overwrite(true);
+            archive_bkp.set_preserve_ownerships(true);
+            archive_bkp.set_preserve_mtime(true);
+            archive_bkp.set_preserve_permissions(true);
+
+            archive_bkp.unpack(
+                Path::new(&TOR_INSTANCE_LIB_DIR)
+                    .join(&relay.name)
+                    .join("keys"),
+            )?;
         }
     }
 
     let systemctl = SystemCtl::default();
 
-    println!("Start services");
+    println!("\nStart services");
 
     for relay in relays.iter() {
         let _ = systemctl.start(format!("tor@{}.service", relay.name).as_ref());
@@ -242,25 +286,37 @@ async fn cmd_start(server_url: String, tpm2: Option<String>, skip_net: bool) -> 
     let wait_seconds = 5;
     println!("Wait {} seconds before bakup keys", wait_seconds);
 
-    sleep(Duration::from_secs(wait_seconds)).await;
+    tokio::time::sleep(Duration::from_secs(wait_seconds)).await;
 
     for relay in relays.iter() {
-        let blob_bkp = backup_tor_keys(&relay.name)?;
-        let encrypted_bkp = encrypt(context, blob_bkp);
+        println!("Backup {}", relay.name);
+        let archive_bkp = backup_tor_keys(&relay.name)?;
+
+        std::fs::write(format!("./{}", relay.name), &archive_bkp)?;
+
+        let encrypted_bkp = cipher
+            .encrypt(&nonce.into(), archive_bkp.as_slice())
+            .unwrap();
 
         let _ = client
-            .post(format!("{}/relays/data/{}", server_url, relay.name))
+            .post(format!("{}/private/relays/data/{}", server_url, relay.name))
             .bearer_auth(&session_token)
             .body(encrypted_bkp)
             .send()
-            .await?;
+            .await?
+            .error_for_status()?;
     }
 
     Ok(())
 }
 
-async fn cmd_tpm(config: TpmCommands) -> anyhow::Result<()> {
-    let context = &mut Context::new(TctiNameConf::from_environment_variable().unwrap()).unwrap();
+async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()> {
+    let tpm_device_name = match tpm2 {
+        Some(device) => TctiNameConf::Device(DeviceConfig::from_str(&device)?),
+        None => TctiNameConf::from_environment_variable()?,
+    };
+
+    let context = &mut Context::new(tpm_device_name)?;
 
     match config {
         TpmCommands::ListPersistent => {}
@@ -283,6 +339,9 @@ async fn cmd_tpm(config: TpmCommands) -> anyhow::Result<()> {
                 "=== Decrypted data ===\n\n{}",
                 std::str::from_utf8(&plain_text).unwrap()
             );
+        }
+        TpmCommands::Test => {
+            test_aes_gcm(context);
         }
     }
 
