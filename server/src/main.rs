@@ -21,7 +21,7 @@ use rustls::{
 };
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use sha256::digest;
-use std::{any::Any, fs::File, io::BufReader, path::PathBuf, sync::Arc};
+use std::{any::Any, env, fs::File, io::BufReader, path::PathBuf, sync::Arc};
 use x509_parser::nom::AsBytes;
 
 use actix_web::error::ErrorInternalServerError;
@@ -270,7 +270,11 @@ async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<
     let relay_burst = 100;
     // NOTE: assume gigabit port, maybe the client should decide on this
     let relay_rate = 1024 / tor_relays.iter().len() as u16;
-    let relays_family = String::from(""); // TODO: uff
+
+    // NOTE: we don't put effort on calculate the family from db because we are waiting for `happy
+    // family` feature from tor
+    let relays_family = env::var("PATELA_RELAY_FAMILY").unwrap_or("".to_string());
+
     let relay_policy = vec![
         TorPolicy {
             verb: TorPolicyVerb::Reject,
