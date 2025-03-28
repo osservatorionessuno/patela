@@ -1,4 +1,5 @@
 use crate::{HwSpecs, PREFIX_V4};
+use anyhow::{anyhow, bail};
 use chrono::Local;
 use ipnetwork::Ipv4Network;
 use sqlx::SqlitePool;
@@ -283,24 +284,31 @@ LIMIT 1
     .fetch_one(&mut *conn)
     .await?;
 
-    // TODO: check for no result
-    let spec: HwSpecs = serde_json::from_str(&row.specs.unwrap())?;
-
-    Ok(spec)
+    match row.specs {
+        Some(ref specs) => Ok(serde_json::from_str(specs)?),
+        None => Err(anyhow!(
+            "No specs stored in the database for node {}",
+            node_id
+        )),
+    }
 }
 
 pub async fn allocate_cheese(pool: &SqlitePool) -> anyhow::Result<(i64, String)> {
     let mut conn = pool.acquire().await?;
 
-    let cheese = sqlx::query!(
+    let cheeses = sqlx::query!(
         r#"
 SELECT id, name FROM cheeses
 WHERE used = 0
-LIMIT 1
         "#
     )
-    .fetch_one(&mut *conn)
+    .fetch_all(&mut *conn)
     .await?;
+
+    let cheese = match cheeses.first() {
+        Some(cheese) => cheese,
+        None => bail!("No more cheese availble"),
+    };
 
     let _ = sqlx::query!(
         r#"
@@ -314,8 +322,7 @@ WHERE ID = (?1)
     .await?
     .last_insert_rowid();
 
-    // TODO: check for no result
-    Ok((cheese.id, cheese.name))
+    Ok((cheese.id, cheese.name.clone()))
 }
 
 /// Search for the biggest ipv4/6 couple and return the next value
