@@ -1,5 +1,6 @@
-use crate::HwSpecs;
+use crate::{HwSpecs, PREFIX_V4};
 use chrono::Local;
+use ipnetwork::Ipv4Network;
 use sqlx::SqlitePool;
 use std::{
     net::{Ipv4Addr, Ipv6Addr},
@@ -330,7 +331,7 @@ SELECT ip_v4, ip_v6 FROM relays
     .fetch_all(&mut *conn)
     .await?;
 
-    let (mut v4, mut v6): (Vec<_>, Vec<_>) = ips
+    let (mut ips_v4, mut ips_v6): (Vec<_>, Vec<_>) = ips
         .iter()
         .map(|addr| {
             (
@@ -340,15 +341,28 @@ SELECT ip_v4, ip_v6 FROM relays
         })
         .unzip();
 
-    v4.sort();
-    v6.sort();
+    ips_v4.sort();
+    ips_v6.sort();
 
-    // We use only one /24 and /48 subnets
-    // TODO: upper bound
-    let next_ip_4 = Ipv4Addr::from_bits(v4.last().unwrap_or(&FIRST_IP_4).to_bits() + 1);
-    let next_ip_6 = Ipv6Addr::from_bits(v6.last().unwrap_or(&FIRST_IP_6).to_bits() + 1);
+    let next_ip_v4 = match ips_v4.last() {
+        Some(last) => Ipv4Addr::from_bits(last.to_bits() + 1),
+        None => FIRST_IP_4,
+    };
 
-    Ok((next_ip_4, next_ip_6))
+    let net_v4 = Ipv4Network::new(FIRST_IP_4, *PREFIX_V4)?;
+
+    let next_ip_v6 = match ips_v6.last() {
+        Some(last) => Ipv6Addr::from_bits(last.to_bits() + 1),
+        None => FIRST_IP_6,
+    };
+
+    // Check if there is room for another ip in the networks, we assume that ipv4 finish first and
+    // more important: the loop on ipv6/48 prefix takes to long!
+    if next_ip_v4.to_bits() >= net_v4.iter().last().unwrap().to_bits() {
+        anyhow::bail!("No more ips availble in the netowrks");
+    };
+
+    Ok((next_ip_v4, next_ip_v6))
 }
 
 pub async fn insert_data(pool: &SqlitePool, relay_id: i64, data: Vec<u8>) -> anyhow::Result<i64> {
@@ -401,11 +415,21 @@ WHERE relays.node_id = ? AND cheeses.name = ?
 mod tests {
     use sqlx::SqlitePool;
 
-    use crate::db::create_node;
+    use crate::db::{FIRST_IP_4, FIRST_IP_6, create_node, find_next_ips};
 
     #[sqlx::test]
     async fn test_create_node(pool: SqlitePool) -> sqlx::Result<()> {
         let _ = create_node(&pool, "prova").await;
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_find_ips(pool: SqlitePool) -> sqlx::Result<()> {
+        let (ipv4, ipv6) = find_next_ips(&pool).await.unwrap();
+
+        assert_eq!(ipv4, FIRST_IP_4);
+        assert_eq!(ipv6, FIRST_IP_6);
 
         Ok(())
     }
