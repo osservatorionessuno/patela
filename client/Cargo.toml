@@ -27,6 +27,7 @@ actix-tls = "3.4.0"
 rustls-pemfile = "2.2.0"
 tar = "0.4.44"
 aes-gcm = "0.10.3"
+mnl = "0.2.2"
 
 [build-dependencies]
 const-gen = "1.6.5"

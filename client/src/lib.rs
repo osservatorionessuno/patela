@@ -15,7 +15,7 @@ use futures::TryStreamExt;
 use ipnetwork::IpNetwork;
 use lazy_static::lazy_static;
 use nftnl::{
-    Batch, Chain, ProtoFamily, Rule, Table,
+    Batch, Chain, FinalizedBatch, ProtoFamily, Rule, Table,
     expr::{Immediate, Nat, NatType, Register},
     nft_expr,
     nftnl_sys::libc,
@@ -242,7 +242,7 @@ pub fn set_source_ip_by_process(
     //
     //// Create a netfilter table operating on both IPv4 and IPv6 (ProtoFamily::Inet)
     let table = Table::new(&NFT_TABLE_NAME, ProtoFamily::Inet);
-    //
+
     //// Add the table to the batch with the `MsgType::Add` type, thus instructing netfilter to add
     //// this table under its `ProtoFamily::Inet` ruleset.
     batch.add(&table, nftnl::MsgType::Add);
@@ -293,6 +293,8 @@ pub fn set_source_ip_by_process(
     };
     rule.add_expr(&nat_expr);
 
+    batch.add(&rule, nftnl::MsgType::Add);
+
     // do the same for ipv6
     let mut rule = Rule::new(&nat_chain);
 
@@ -312,6 +314,39 @@ pub fn set_source_ip_by_process(
     };
     rule.add_expr(&nat_expr);
 
+    batch.add(&rule, nftnl::MsgType::Add);
+
+    let finalized_batch = batch.finalize();
+
+    send_and_process(&finalized_batch)?;
+
+    Ok(())
+}
+
+fn socket_recv<'a>(socket: &mnl::Socket, buf: &'a mut [u8]) -> anyhow::Result<Option<&'a [u8]>> {
+    let ret = socket.recv(buf)?;
+    if ret > 0 {
+        Ok(Some(&buf[..ret]))
+    } else {
+        Ok(None)
+    }
+}
+
+fn send_and_process(batch: &FinalizedBatch) -> anyhow::Result<()> {
+    let socket = mnl::Socket::new(mnl::Bus::Netfilter)?;
+    socket.send_all(batch)?;
+
+    let portid = socket.portid();
+    let mut buffer = vec![0; nftnl::nft_nlmsg_maxsize() as usize];
+    let very_unclear_what_this_is_for = 0;
+    while let Some(message) = socket_recv(&socket, &mut buffer[..])? {
+        match mnl::cb_run(message, very_unclear_what_this_is_for, portid)? {
+            mnl::CbResult::Stop => {
+                break;
+            }
+            mnl::CbResult::Ok => (),
+        }
+    }
     Ok(())
 }
 
