@@ -231,7 +231,7 @@ pub fn set_source_ip_by_process(
     pid: u32,
     srcmark: i32,
     ip4: Ipv4Addr,
-    _ip6: Ipv6Addr,
+    ip6: Ipv6Addr,
 ) -> anyhow::Result<()> {
     // Heavily inspired by https://github.com/mullvad/mullvadvpn-app/blob/5025db74b34cfb3536c43f89f3407ffc0d97ae73/talpid-core/src/firewall/linux.rs#L314
     //
@@ -293,7 +293,25 @@ pub fn set_source_ip_by_process(
     };
     rule.add_expr(&nat_expr);
 
-    // TODO: add ipv6
+    // do the same for ipv6
+    let mut rule = Rule::new(&nat_chain);
+
+    rule.add_expr(&nft_expr!(meta oif));
+    rule.add_expr(&nft_expr!(cmp != iface_index));
+
+    rule.add_expr(&nft_expr!(ct mark));
+    rule.add_expr(&nft_expr!(cmp == srcmark));
+
+    rule.add_expr(&Immediate::new(ip6, Register::Reg1));
+
+    let nat_expr = Nat {
+        nat_type: NatType::SNat,
+        family: ProtoFamily::Ipv6,
+        ip_register: Register::Reg1,
+        port_register: None,
+    };
+    rule.add_expr(&nat_expr);
+
     Ok(())
 }
 
