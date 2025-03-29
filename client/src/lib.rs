@@ -220,7 +220,7 @@ pub async fn add_network_address(
 ///
 /// The iptables equivalents rules are:
 ///
-/// `-A OUTPUT -m owner --uid-owner <process id> -j MARK --set-mark <mark id>`
+/// `-A OUTPUT -m owner --uid-owner <user id> -j MARK --set-mark <mark id>`
 /// `-A <network interface> -m mark --mark <mark id>/0xff -j SNAT --to-source <source ip>`
 ///
 /// Traslated to nftables:
@@ -229,6 +229,7 @@ pub async fn add_network_address(
 pub fn set_source_ip_by_process(
     iface_index: u32,
     pid: u32,
+    srcmark: i32,
     ip4: Ipv4Addr,
     _ip6: Ipv6Addr,
 ) -> anyhow::Result<()> {
@@ -260,8 +261,6 @@ pub fn set_source_ip_by_process(
     batch.add(&nat_chain, nftnl::MsgType::Add);
 
     let mut rule = Rule::new(&mangle_chain);
-
-    let srcmark = 0x101;
 
     // - `add rule ip filter OUTPUT skuid <process id> counter meta mark set <mark id>`
     // load pid
