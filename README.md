@@ -10,7 +10,8 @@ configuration manager that relies on tpm for identity and crypto operation.
 > Force](https://enet4.github.io/rust-tropes/rust-evangelism-strike-force/),
 > the motivation for writing this in rust are:
 >
-> - Easy to create a multi-binary application, would be useful for unikernel
+> - Easy to create a multi-binary application and cross-compile to different
+>   architectures
 > - Arti (new tor) is in rust and in future we want to deal with their rpc
 >   interface squotting the official data structures
 
@@ -26,36 +27,47 @@ configuration manager that relies on tpm for identity and crypto operation.
 
 ### Boot
 
-1. live boot from usb
+We rely on [stboot](https://git.glasklar.is/system-transparency/core/stboot), a
+beautiful bootloader by [System
+Transparency](https://docs.system-transparency.org/st-1.0.0/).
+
+1. live boot from usb (future with iPxe)
 2. stboot hw validation
 3. dhcp mgmt interface
 4. fetch linux main stage image from server
 
 ### First run
 
-1. `client`: generate rsa keys in the tpm and persist
-2. `both`: mtls with the server
-3. `server`: authenticate with the public part of the key (in future replace
-   with full remote attestation)
-4. `server`: generates a bearer token for session
-5. `client`: push hw resourcers (ncpu, clock, memory, ...)
-6. `server`: generate tor and network configurations
-7. `client`: apply configurations
-8. `client`: start relays
-9. `client`: healthcheck
-10. `client`: encrypt tor long term keys with tpm and backup to server
+1. `client`: generate primary key in the TPM
+2. `client`: generate AES-GCM keys
+3. `both`: initiate mTLS authentication/connection
+4. `server`: authenticate using the public part of the TPM primary key
+5. `database`: store node information
+6. `server`: generate a bearer token (containing node information) for session authentication with Biscuit
+7. `client`: send AES-GCM keys encrypted with the TPM
+8. `database`: store encrypted keys
+9. `client`: report hardware resources (CPU cores, clock speed, memory, etc.)
+10. `server`: generate Tor and network configurations
+11. `database`: store relay information and allocate resources (hostnames, IPs)
+12. `client`: apply network configuration (IP binding)
+13. `client`: create Tor instances
+14. `client`: generate Tor configurations
+15. `client`: start relay services
+16. `client`: create an archive for each relay containing its keys
+17. `client`: encrypt backups and send them to the server
+18. `database`: store encrypted backups
 
 ### Second run
 
-1. `client`: read primary key from persistent memory
-2. ...
-3. ...
-4. ...
-5. ...
-6. `server`: fetch configurations from db
-7. ...
-8. (bis) `client`: fetch encrypted keys bkp
-9. ...
+The only differences are:
+
+1. `client`: fetch primary key from tpm's persistent storage handler
+2. `client`: fetch aes-gcm keys backup and decrypt with tpm
+3. `client`: fetch relays key backup and unarchive in the correct place
+
+### Schema
+
+![](./misc/schema.svg)
 
 ## Future work and design
 
