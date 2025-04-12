@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS relays
     date	TEXT                NOT NULL UNIQUE,
     ip_v4       TEXT                NOT NULL UNIQUE,
     ip_v6       TEXT                NOT NULL UNIQUE,
+    fingerprint TEXT,
     FOREIGN KEY(node_id) REFERENCES nodes(id) ON DELETE CASCADE,
     FOREIGN KEY(cheese_id) REFERENCES cheeses(id) ON DELETE SET NULL
 );
