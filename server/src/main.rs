@@ -267,9 +267,9 @@ async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<
             .map_err(ErrorInternalServerError)?;
     }
 
-    let relay_burst = 100;
     // NOTE: assume gigabit port, maybe the client should decide on this
     let relay_rate = 1024 / tor_relays.iter().len() as u16;
+    let relay_burst = relay_rate; // burst should be at least same than rate
 
     // NOTE: we don't put effort on calculate the family from db because we are waiting for `happy
     // family` feature from tor
