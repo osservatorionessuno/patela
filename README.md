@@ -43,7 +43,8 @@ Transparency](https://docs.system-transparency.org/st-1.0.0/).
 3. `both`: initiate mTLS authentication/connection
 4. `server`: authenticate using the public part of the TPM primary key
 5. `database`: store node information
-6. `server`: generate a bearer token (containing node information) for session authentication with Biscuit
+6. `server`: generate a bearer token (containing node information) for session
+   authentication with Biscuit
 7. `client`: send AES-GCM keys encrypted with the TPM
 8. `database`: store encrypted keys
 9. `client`: report hardware resources (CPU cores, clock speed, memory, etc.)
@@ -269,7 +270,9 @@ just amazing. In my use case I want to build the debug version on my archlinux
 laptop and run in a debian bookworm vm. The two glibc are incompatible but with
 zig you need just to run:
 
-`console cargo zigbuild --target x86_64-unknown-linux-gnu.2.36`
+```console
+cargo zigbuild --target x86_64-unknown-linux-gnu.2.36`
+```
 
 To test with qemu/libvirt you can start with a virsh example in
 `misc/virsh.xml`, open the file and replace `YOUR_PATH` with a valid
