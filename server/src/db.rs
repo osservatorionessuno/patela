@@ -21,7 +21,7 @@ use std::{
 /// query, but the life is to short to learn another db? A valid alternative could be to have an fs
 /// db with all the configuration and just file blobs dropped around.
 ///
-const FIRST_IP_4: Ipv4Addr = Ipv4Addr::new(4, 190, 76, 100);
+const FIRST_IP_4: Ipv4Addr = Ipv4Addr::new(64, 190, 76, 10);
 const FIRST_IP_6: Ipv6Addr = Ipv6Addr::new(0x2001, 0x67c, 0xe28, 0x1, 0, 0, 0, 0x100);
 
 #[derive(Debug)]
