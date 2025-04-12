@@ -460,7 +460,6 @@ async fn cmd_run(
     })
     .on_connect(get_client_cert)
     .bind_rustls_0_23((host, port), config)?
-    .workers(1)
     .run()
     .await
 }
