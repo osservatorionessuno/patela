@@ -206,30 +206,10 @@ openssl x509 -req -days 365 -set_serial 01 \
    -CAcreateserial -extfile <(printf "subjectAltName=DNS:patela.lol,DNS:localhost,IP:127.0.0.1,IP:::1\n")
 ```
 
-client keys and certs
+For generate client certificates use the script in `misc/client-cert.sh`
 
 ```console
-openssl req -newkey rsa:4096 -nodes -days 365 \
-   -keyout certs/cantina-client-key.pem \
-   -out certs/cantina-client-req.pem
-
-openssl x509 -req -days 365000 -set_serial 01 \
-   -in certs/cantina-client-req.pem \
-   -out certs/cantina-client-cert.pem \
-   -CA certs/cantina-ca-cert.pem \
-   -CAkey certs/cantina-ca-key.pem
-```
-
-verify
-
-```console
-openssl verify -CAfile certs/cantina-ca-cert.pem \
-   certs/cantina-ca-cert.pem \
-   certs/cantina-server-cert.pem
-
-openssl verify -CAfile certs/cantina-ca-cert.pem \
-   certs/cantina-ca-cert.pem \
-   certs/cantina-client-cert.pem
+./misc/client-cert.sh apu-1
 ```
 
 ## TPM
