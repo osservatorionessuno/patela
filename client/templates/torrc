@@ -1,6 +1,9 @@
 
 Nickname {{ name }}
 
+AvoidDiskWrites 1
+DisableAllSwap 1
+
 ORPort {{ or_address_v4 }}:{{ or_port }}
 ORPort [{{ or_address_v6  }}]:{{ or_port }}
 
