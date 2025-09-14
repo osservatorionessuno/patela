@@ -8,7 +8,7 @@ use std::{
 pub mod api;
 pub mod db;
 
-const RELAY_MEMORY_BOUND: u64 = 700;
+const RELAY_MEMORY_BOUND: u64 = 1024; // TODO: configurable
 pub const RELAY_OR_PORT: u16 = 9001;
 
 lazy_static! {
