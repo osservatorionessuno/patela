@@ -23,7 +23,7 @@ use nftnl::{
 use patela_server::{HwSpecs, HwSpecsNetwork, Network, TorRelayConf};
 use reqwest::Client;
 use rtnetlink::{
-    RouteMessageBuilder,
+    LinkUnspec, RouteMessageBuilder,
     packet_route::{
         AddressFamily,
         address::AddressAttribute,
@@ -212,6 +212,20 @@ pub async fn add_network_address(
             .execute()
             .await?
     }
+    Ok(())
+}
+
+pub async fn set_link_up(handle: &rtnetlink::Handle, link_index: u32) -> anyhow::Result<()> {
+    let mut links = handle.link().get().match_index(link_index).execute();
+
+    if let Some(link) = links.try_next().await? {
+        handle
+            .link()
+            .set(LinkUnspec::new_with_index(link.header.index).up().build())
+            .execute()
+            .await?
+    }
+
     Ok(())
 }
 

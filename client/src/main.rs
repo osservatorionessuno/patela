@@ -211,6 +211,7 @@ async fn cmd_start(
         tokio::spawn(connection);
 
         let interface_index = find_network_interface(&net_handle).await?;
+        set_link_up(&net_handle, interface_index).await?;
 
         // use the relay positition for snat tagging
         for relay in relays.iter() {
@@ -251,6 +252,10 @@ async fn cmd_start(
                 Ipv6Addr::from_str(relay.or_address_v6.as_ref())?,
             )?;
         }
+
+        // add default route only after
+        add_default_route_v4(tor_conf.network.ipv4_gateway.parse()?, &net_handle).await?;
+        add_default_route_v6(tor_conf.network.ipv6_gateway.parse()?, &net_handle).await?;
     }
 
     if !is_first_run && !skip_backup {
