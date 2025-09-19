@@ -185,24 +185,24 @@ Ok let's start by generating the keys
 ```console
 mkdir certs
 openssl req -new -x509 -nodes -days 365 \
-   -key certs/cantina-ca-key.pem \
-   -out certs/cantina-ca-cert.pem
+   -key certs/ca-key.pem \
+   -out certs/ca-cert.pem
 ```
 
 server keys and certs, please note that you have to embed you server name or ip
 
 ```console
 openssl x509 -req -days 365 -set_serial 01 \
-   -in certs/cantina-server-req.pem \
-   -out certs/cantina-server-cert.pem \
-   -CA certs/cantina-ca-cert.pem \
-   -CAkey certs/cantina-ca-key.pem
+   -in certs/server-req.pem \
+   -out certs/server-cert.pem \
+   -CA certs/ca-cert.pem \
+   -CAkey certs/ca-key.pem
 
 openssl x509 -req -days 365 -set_serial 01 \
-   -in certs/cantina-server-req.pem \
-   -out certs/cantina-server-cert.pem \
-   -CA certs/cantina-ca-cert.pem \
-   -CAkey certs/cantina-ca-key.pem \
+   -in certs/server-req.pem \
+   -out certs/server-cert.pem \
+   -CA certs/ca-cert.pem \
+   -CAkey certs/ca-key.pem \
    -CAcreateserial -extfile <(printf "subjectAltName=DNS:patela.lol,DNS:localhost,IP:127.0.0.1,IP:::1\n")
 ```
 

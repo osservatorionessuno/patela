@@ -1,4 +1,5 @@
 tpm2_createprimary -C o -G rsa -c primary.ctx
+
 # create RSA
 tpm2_create -G rsa -u key.pub -r key.priv -C primary.ctx # -a "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|decrypt|sign"
 
@@ -8,6 +9,7 @@ echo "miao miao" > secret.txt
 
 # encrypt secret
 tpm2_rsaencrypt -c 0x81008000  -o secret.txt.enc secret.txt
+
 # export the public to send to server
 tpm2_readpublic -c 0x81008000 -o key.pem --format=pem
 

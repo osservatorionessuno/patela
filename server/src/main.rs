@@ -38,13 +38,13 @@ enum Commands {
         #[arg(long, default_value_t = 8020)]
         port: u16,
         /// tls authority cert
-        #[arg(long, default_value = "certs/cantina-ca-cert.pem")]
+        #[arg(long, default_value = "certs/ca-cert.pem")]
         ca_cert: PathBuf,
         /// tls server certificate
-        #[arg(long, default_value = "certs/cantina-server-cert.pem")]
+        #[arg(long, default_value = "certs/server-cert.pem")]
         server_cert: PathBuf,
         /// tls server key
-        #[arg(long, default_value = "certs/cantina-server-key.pem")]
+        #[arg(long, default_value = "certs/server-key.pem")]
         server_key: PathBuf,
         /// biscuit private key
         #[arg(long, env = "PATELA_BISCUIT_KEY")]
