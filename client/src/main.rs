@@ -213,7 +213,7 @@ async fn cmd_start(
         let interface_index = find_network_interface(&net_handle).await?;
 
         // use the relay positition for snat tagging
-        for (i, relay) in relays.iter().enumerate() {
+        for relay in relays.iter() {
             add_network_address(
                 interface_index,
                 Ipv4Network::new(
@@ -246,7 +246,7 @@ async fn cmd_start(
             set_source_ip_by_process(
                 interface_index,
                 uid,
-                i.try_into()?,
+                uid.try_into()?,
                 Ipv4Addr::from_str(relay.or_address_v4.as_ref())?,
                 Ipv6Addr::from_str(relay.or_address_v6.as_ref())?,
             )?;
