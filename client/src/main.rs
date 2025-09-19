@@ -2,6 +2,7 @@ use std::{
     ffi::CString,
     fs,
     net::{Ipv4Addr, Ipv6Addr},
+    os::unix::fs::chown,
     path::Path,
     process::Command,
     str::FromStr,
@@ -277,11 +278,25 @@ async fn cmd_start(
             archive_bkp.set_preserve_mtime(true);
             archive_bkp.set_preserve_permissions(true);
 
-            archive_bkp.unpack(
-                Path::new(&TOR_INSTANCE_LIB_DIR)
-                    .join(&relay.name)
-                    .join("keys"),
-            )?;
+            let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
+                .join(&relay.name)
+                .join("keys");
+
+            archive_bkp.unpack(&keys_dir)?;
+
+            let uid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
+                .unwrap()
+                .uid;
+            let gid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
+                .unwrap()
+                .gid;
+
+            // Fix permissions on keys directory
+            let _ = chown(&keys_dir, Some(uid), Some(gid))?;
+
+            for entry in fs::read_dir(&keys_dir)? {
+                chown(entry?.path(), Some(uid), Some(gid))?;
+            }
         }
     }
 
