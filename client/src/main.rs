@@ -1,13 +1,4 @@
-use std::{
-    ffi::CString,
-    fs,
-    net::{Ipv4Addr, Ipv6Addr},
-    os::unix::fs::chown,
-    path::Path,
-    process::Command,
-    str::FromStr,
-    time::Duration,
-};
+use std::{ffi::CString, fs, os::unix::fs::chown, path::Path, process::Command, time::Duration};
 
 use aes_gcm::aead::Aead;
 use clap::Parser;
@@ -18,13 +9,12 @@ use patela_client::{api::build_client, tpm::*, *};
 use patela_server::api::{ApiNodeCreateResponse, ApiRelaysResponse};
 use systemctl::SystemCtl;
 use tar::Archive;
-use tss_esapi::{Context, TctiNameConf, handles::KeyHandle, tcti_ldr::DeviceConfig};
+use tss_esapi::{Context, TctiNameConf, handles::KeyHandle};
 
 #[derive(Subcommand, Debug, Clone)]
 enum NetCommands {
     Add,
     List,
-    Route,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -96,7 +86,7 @@ async fn cmd_start(
     skip_backup: bool,
 ) -> anyhow::Result<()> {
     let tpm_device_name = match tpm2 {
-        Some(device) => TctiNameConf::Device(DeviceConfig::from_str(&device)?),
+        Some(device) => TctiNameConf::Device(device.parse()?),
         None => TctiNameConf::from_environment_variable()?,
     };
 
@@ -217,21 +207,15 @@ async fn cmd_start(
         for relay in relays.iter() {
             add_network_address(
                 interface_index,
-                Ipv4Network::new(
-                    Ipv4Addr::from_str(&relay.or_address_v4)?,
-                    tor_conf.network.ipv4_prefix,
-                )?
-                .into(),
+                Ipv4Network::new(relay.or_address_v4.parse()?, tor_conf.network.ipv4_prefix)?
+                    .into(),
                 &net_handle,
             )
             .await?;
             add_network_address(
                 interface_index,
-                Ipv6Network::new(
-                    Ipv6Addr::from_str(&relay.or_address_v6)?,
-                    tor_conf.network.ipv6_prefix,
-                )?
-                .into(),
+                Ipv6Network::new(relay.or_address_v6.parse()?, tor_conf.network.ipv6_prefix)?
+                    .into(),
                 &net_handle,
             )
             .await?;
@@ -248,8 +232,8 @@ async fn cmd_start(
                 interface_index,
                 uid,
                 uid.try_into()?,
-                Ipv4Addr::from_str(relay.or_address_v4.as_ref())?,
-                Ipv6Addr::from_str(relay.or_address_v6.as_ref())?,
+                relay.or_address_v4.parse()?,
+                relay.or_address_v6.parse()?,
             )?;
         }
 
@@ -297,7 +281,7 @@ async fn cmd_start(
                 .gid;
 
             // Fix permissions on keys directory
-            let _ = chown(&keys_dir, Some(uid), Some(gid))?;
+            chown(&keys_dir, Some(uid), Some(gid))?;
 
             for entry in fs::read_dir(&keys_dir)? {
                 chown(entry?.path(), Some(uid), Some(gid))?;
@@ -342,7 +326,7 @@ async fn cmd_start(
 
 async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()> {
     let tpm_device_name = match tpm2 {
-        Some(device) => TctiNameConf::Device(DeviceConfig::from_str(&device)?),
+        Some(device) => TctiNameConf::Device(device.parse()?),
         None => TctiNameConf::from_environment_variable()?,
     };
 
@@ -386,9 +370,6 @@ async fn cmd_net(config: NetCommands) -> anyhow::Result<()> {
         NetCommands::Add => {}
         NetCommands::List => {
             let _ = find_network_interface(&handle).await.unwrap();
-        }
-        NetCommands::Route => {
-            add_default_route_v4(Ipv4Addr::from_str("192.168.122.1")?, &handle).await?;
         }
     }
 

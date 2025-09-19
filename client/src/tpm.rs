@@ -68,19 +68,19 @@ pub fn find_persistent_handle(
     while let Ok((capability_data, more_data_available)) =
         ctx.get_capability(CapabilityType::Handles, property, 1)
     {
-        if let CapabilityData::Handles(persistent_handles) = capability_data {
-            if let Some(&retrieved_persistent_handle) = persistent_handles.first() {
-                if retrieved_persistent_handle == persistent_tpm_handle.into() {
-                    let handle = ctx
-                        .tr_from_tpm_public(TpmHandle::Persistent(persistent_tpm_handle))
-                        .expect("Failed to retrieve handle from TPM");
+        if let CapabilityData::Handles(persistent_handles) = capability_data
+            && let Some(&retrieved_persistent_handle) = persistent_handles.first()
+        {
+            if retrieved_persistent_handle == persistent_tpm_handle.into() {
+                let handle = ctx
+                    .tr_from_tpm_public(TpmHandle::Persistent(persistent_tpm_handle))
+                    .expect("Failed to retrieve handle from TPM");
 
-                    return Some(handle);
-                }
+                return Some(handle);
+            }
 
-                if more_data_available {
-                    property = TPM2_HANDLE::from(retrieved_persistent_handle) + 1;
-                }
+            if more_data_available {
+                property = TPM2_HANDLE::from(retrieved_persistent_handle) + 1;
             }
         }
 

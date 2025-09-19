@@ -47,7 +47,7 @@ const NFT_TABLE_NAME: &CStr = c"patela";
 const MANGLE_CHAIN_NAME: &CStr = c"mangle";
 const MANGLE_CHAIN_PRIORITY: i32 = libc::NF_IP_PRI_MANGLE;
 const NAT_CHAIN_NAME: &CStr = c"nat";
-pub const TOR_INSTANCE_LIB_DIR: &'static str = "/var/lib/tor-instances";
+pub const TOR_INSTANCE_LIB_DIR: &str = "/var/lib/tor-instances";
 
 lazy_static! {
     static ref TEMPLATES: Tera = {
