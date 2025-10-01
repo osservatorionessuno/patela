@@ -10,7 +10,7 @@ ORPort [{{ or_address_v6  }}]:{{ or_port }}
 RelayBandwidthRate {{ bandwidth_rate }} MB
 RelayBandwidthBurst {{ bandwidth_burst }} MB
 
-MaxMemInQueues 800 MB
+MaxMemInQueues 400 MB
 
 ContactInfo email:info[]osservatorionessuno.org url:https://osservatorionessuno.org proof:uri-rsa abuse:exit[]osservatorionessuno.org mastodon:https://mastodon.cisti.org/@0n_odv donationurl:https://osservatorionessuno.org/participate/ ciissversion:2
 

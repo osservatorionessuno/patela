@@ -268,8 +268,8 @@ async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<
     }
 
     // NOTE: assume gigabit port, maybe the client should decide on this
-    let relay_rate = 1024 / tor_relays.iter().len() as u16;
-    let relay_burst = relay_rate; // burst should be at least same than rate
+    let relay_rate = 40;
+    let relay_burst = 80; // burst should be at least same than rate
 
     // NOTE: we don't put effort on calculate the family from db because we are waiting for `happy
     // family` feature from tor
@@ -405,7 +405,8 @@ async fn cmd_run(
     let shared_data = Data::new(PatelaServer {
         db: db_pool,
         biscuit_root: biscuit_auth::KeyPair::from(
-            &PrivateKey::from_bytes_hex(&biscuit_key).unwrap(),
+            &PrivateKey::from_bytes_hex(&biscuit_key, biscuit_auth::builder::Algorithm::Ed25519)
+                .unwrap(),
         ),
     });
 
