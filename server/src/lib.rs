@@ -7,6 +7,7 @@ use std::{
 
 pub mod api;
 pub mod db;
+pub mod tor_config;
 
 const RELAY_MEMORY_BOUND: u64 = 1024; // TODO: configurable
 pub const RELAY_OR_PORT: u16 = 9001;
@@ -92,8 +93,20 @@ pub struct HwSpecs {
     pub cpu_freqz: u64,
     pub cpu_name: String,
     pub memory: u64,
-    //pub network: Vec<HwSpecsNetwork>,
 }
+
+// TODO:
+// pub fn set_torrc_as_default_conf(input: String) {}
+// TODO:
+// pub fn get_default_conf(input: String) {}
+// TODO:
+// pub fn set_torrc_as_node_conf(input: String, node: id) {}
+// TODO:
+// pub fn get_node_conf(input: String, node: id) {}
+// TODO:
+// pub fn set_relay_conf(input: String, node: id, name, value) {}
+// TODO:
+// pub fn get_relay_conf(input: String, node: id, Option<name>) {}
 
 /// Compute the number of exit relay based on two metrics:
 /// 1. Tor is mainly single thread
