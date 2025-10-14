@@ -9,8 +9,7 @@ use actix_web::{
 };
 use actix_web_httpauth::{extractors::bearer::BearerAuth, middleware::HttpAuthentication};
 use biscuit_auth::{Biscuit, PrivateKey, PublicKey, macros::biscuit};
-use clap::Parser;
-use clap::clap_derive::Subcommand;
+use clap::{Args, Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 use log::info;
 use patela_server::{api::*, db::*, *};
@@ -27,39 +26,8 @@ use x509_parser::nom::AsBytes;
 use actix_web::error::ErrorInternalServerError;
 use sqlx::SqlitePool;
 
-#[derive(Subcommand, Debug, Clone)]
-enum Commands {
-    /// Run patela web server
-    Run {
-        /// bind local ip
-        #[arg(long, default_value = "0.0.0.0")]
-        host: String,
-        /// bind port for tls server
-        #[arg(long, default_value_t = 8020)]
-        port: u16,
-        /// tls authority cert
-        #[arg(long, default_value = "certs/ca-cert.pem")]
-        ca_cert: PathBuf,
-        /// tls server certificate
-        #[arg(long, default_value = "certs/server-cert.pem")]
-        server_cert: PathBuf,
-        /// tls server key
-        #[arg(long, default_value = "certs/server-key.pem")]
-        server_key: PathBuf,
-        /// biscuit private key
-        #[arg(long, env = "PATELA_BISCUIT_KEY")]
-        biscuit_key: String,
-    },
-    /// List nodes and relays
-    List,
-    /// Remove node and stored conf
-    Remove { id: i64 },
-}
-
-#[derive(Debug, Clone, Parser)]
-struct Config {
-    #[command(subcommand)]
-    cmd: Commands,
+#[derive(Debug, Args, Clone)]
+struct GlobalOpts {
     #[command(flatten)]
     verbose: Verbosity,
     /// use abs path as `sqlite:$PWD/patela.db`
@@ -67,6 +35,130 @@ struct Config {
     database_url: String,
 }
 
+#[derive(Debug, Args, Clone)]
+struct CmdRunArgs {
+    /// bind local ip
+    #[clap(long, default_value = "0.0.0.0")]
+    host: String,
+    /// bind port for tls server
+    #[clap(long, default_value_t = 8020)]
+    port: u16,
+    /// tls authority cert
+    #[clap(long, default_value = "certs/ca-cert.pem")]
+    ca_cert: PathBuf,
+    /// tls server certificate
+    #[clap(long, default_value = "certs/server-cert.pem")]
+    server_cert: PathBuf,
+    /// tls server key
+    #[clap(long, default_value = "certs/server-key.pem")]
+    server_key: PathBuf,
+    /// biscuit private key
+    #[clap(long, env = "PATELA_BISCUIT_KEY")]
+    biscuit_key: String,
+}
+
+#[derive(Subcommand, Clone, Debug)]
+enum CmdListScope {
+    /// All nodes and relays
+    All,
+    /// A node is an OS that runs one or more relays
+    Node,
+    /// Single tor relay
+    Relay,
+}
+
+#[derive(Subcommand, Clone, Debug)]
+enum CmdVerbScope {
+    /// Fallback configuration for all the relays
+    Default,
+    /// Node-specific configuration override
+    Node,
+    /// Relay-specific configuration override
+    Relay,
+}
+
+#[derive(Clone, Debug)]
+enum InputSource {
+    Stdin,
+    File(PathBuf),
+}
+
+impl std::str::FromStr for InputSource {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "-" {
+            Ok(InputSource::Stdin)
+        } else {
+            Ok(InputSource::File(PathBuf::from(s)))
+        }
+    }
+}
+
+#[derive(Debug, Subcommand, Clone)]
+enum CmdConfVerb {
+    /// Parse a torrc file and set as default configuration
+    Import {
+        /// Input file, `-` for stdin
+        #[arg()]
+        input: InputSource,
+        /// Save the parsed file as default global configuration
+        #[arg(short, long)]
+        default: bool,
+    },
+    /// Configure a configuration
+    Set {
+        #[command(subcommand)]
+        scope: CmdVerbScope,
+        /// TODO: use torvalue
+        directive: Option<String>,
+        value: Option<String>,
+    },
+    /// Read a configuration
+    Get {
+        #[command(subcommand)]
+        scope: CmdVerbScope,
+        /// Json format
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// Remove a configuration
+    Remove {
+        #[command(subcommand)]
+        scope: CmdVerbScope,
+        directive: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Commands {
+    /// Run patela web server
+    Run(CmdRunArgs),
+    /// List nodes and relays
+    List {
+        // TODO: default to all
+        #[command(subcommand)]
+        resource: CmdListScope,
+        /// limit the result by name
+        #[arg()]
+        filter: Option<String>,
+    },
+    /// Handle global, node and relay configurations
+    Conf {
+        #[command(subcommand)]
+        verb: CmdConfVerb,
+    },
+}
+
+#[derive(Debug, Clone, Parser)]
+struct PatelaArgs {
+    #[clap(flatten)]
+    global_opts: GlobalOpts,
+    #[command(subcommand)]
+    cmd: Commands,
+}
+
+/// Long running web server and internal states
 struct PatelaServer {
     db: SqlitePool,
     biscuit_root: biscuit_auth::KeyPair,
@@ -137,92 +229,6 @@ async fn auth(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<im
     Ok(HttpResponse::Ok().body(payload))
 }
 
-#[get("/node/key")]
-async fn get_node_key(
-    app: Data<PatelaServer>,
-    req: HttpRequest,
-) -> actix_web::Result<impl Responder> {
-    let node_id = node_id_from_request(&req, app.biscuit_root.public())
-        .await
-        .map_err(ErrorNotFound)?;
-
-    let (key, _) = get_node_key_and_nonce(&app.db, node_id)
-        .await
-        .map_err(ErrorNotFound)?;
-
-    let key = key.ok_or(ErrorNotFound("No key found"))?;
-
-    Ok(HttpResponse::Ok().body(key))
-}
-
-#[post("/node/key")]
-async fn post_node_key(
-    app: Data<PatelaServer>,
-    req: HttpRequest,
-    body: Bytes,
-) -> actix_web::Result<impl Responder> {
-    let node_id = node_id_from_request(&req, app.biscuit_root.public())
-        .await
-        .map_err(ErrorNotFound)?;
-
-    update_node_aes_key(&app.db, node_id, body.to_vec())
-        .await
-        .map_err(ErrorNotFound)?;
-
-    Ok(HttpResponse::Ok())
-}
-
-#[get("/node/nonce")]
-async fn get_node_nonce(
-    app: Data<PatelaServer>,
-    req: HttpRequest,
-) -> actix_web::Result<impl Responder> {
-    let node_id = node_id_from_request(&req, app.biscuit_root.public())
-        .await
-        .map_err(ErrorNotFound)?;
-
-    let (_, nonce) = get_node_key_and_nonce(&app.db, node_id)
-        .await
-        .map_err(ErrorNotFound)?;
-
-    let nonce = nonce.ok_or(ErrorNotFound("No nonce found"))?;
-
-    Ok(HttpResponse::Ok().body(nonce))
-}
-
-#[post("/node/nonce")]
-async fn post_node_nonce(
-    app: Data<PatelaServer>,
-    req: HttpRequest,
-    body: Bytes,
-) -> actix_web::Result<impl Responder> {
-    let node_id = node_id_from_request(&req, app.biscuit_root.public())
-        .await
-        .map_err(ErrorNotFound)?;
-
-    update_node_aes_nonce(&app.db, node_id, body.to_vec())
-        .await
-        .map_err(ErrorNotFound)?;
-
-    Ok(HttpResponse::Ok())
-}
-
-#[post("/specs")]
-async fn specs(
-    app: Data<PatelaServer>,
-    req: HttpRequest,
-    specs: Json<HwSpecs>,
-) -> actix_web::Result<impl Responder> {
-    let node_id = node_id_from_request(&req, app.biscuit_root.public())
-        .await
-        .map_err(ErrorNotFound)?;
-
-    match create_node_spec(&app.db, node_id, &specs).await {
-        Err(err) => Err(ErrorInternalServerError(err)),
-        Ok(_) => Ok(HttpResponse::Ok()),
-    }
-}
-
 #[get("/relays")]
 async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<impl Responder> {
     let node_id = node_id_from_request(&req, app.biscuit_root.public())
@@ -268,7 +274,7 @@ async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<
     }
 
     // NOTE: assume gigabit port, maybe the client should decide on this
-    let relay_rate = 40;
+    let relay_rate = 30;
     let relay_burst = 80; // burst should be at least same than rate
 
     // NOTE: we don't put effort on calculate the family from db because we are waiting for `happy
@@ -448,14 +454,7 @@ async fn cmd_run(
             .service(
                 web::scope("/private")
                     .wrap(HttpAuthentication::bearer(ok_validator))
-                    .service(specs)
-                    .service(relays)
-                    .service(get_node_key)
-                    .service(get_node_nonce)
-                    .service(post_node_key)
-                    .service(post_node_nonce)
-                    .service(get_relay_data)
-                    .service(post_relay_data),
+                    .service(relays),
             )
             .wrap(middleware::Logger::new("%t %s %U"))
     })
@@ -467,35 +466,33 @@ async fn cmd_run(
 
 #[actix_web::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::parse();
+    let config = PatelaArgs::parse();
     env_logger::Builder::new()
-        .filter_level(config.verbose.log_level_filter())
+        .filter_level(config.global_opts.verbose.log_level_filter())
         .init();
 
-    let pool = SqlitePool::connect(&config.database_url).await.unwrap();
+    let pool = SqlitePool::connect(&config.global_opts.database_url)
+        .await
+        .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
 
     match config.cmd {
-        Commands::Run {
-            host,
-            port,
-            ca_cert,
-            server_cert,
-            server_key,
-            biscuit_key,
-        } => {
+        Commands::Run(run_conf) => {
             cmd_run(
                 pool,
-                host,
-                port,
-                ca_cert,
-                server_cert,
-                server_key,
-                biscuit_key,
+                run_conf.host,
+                run_conf.port,
+                run_conf.ca_cert,
+                run_conf.server_cert,
+                run_conf.server_key,
+                run_conf.biscuit_key,
             )
             .await?;
         }
-        Commands::List => {
+        Commands::List {
+            resource: _,
+            filter: _,
+        } => {
             // Fetch all nodes
             let nodes = get_nodes(&pool).await?;
 
@@ -513,10 +510,23 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Remove { id } => {
-            let _ = remove_node(&pool, id).await;
-            println!("Removed node {}", id);
-        }
+        Commands::Conf { verb } => match verb {
+            CmdConfVerb::Import { input, default } => {
+                // TODO: open file or stdin
+                // TODO: parse torrc
+            }
+            CmdConfVerb::Get { scope, json } => {
+                // TODO: filter by scope
+                // TODO: get from db
+                // TODO: pretty print or json
+            }
+            CmdConfVerb::Set {
+                scope,
+                directive,
+                value,
+            } => !unimplemented!(),
+            CmdConfVerb::Remove { scope, directive } => !unimplemented!(),
+        },
     }
     Ok(())
 }
