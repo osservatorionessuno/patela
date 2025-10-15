@@ -1,14 +1,20 @@
-use std::{ffi::CString, fs, os::unix::fs::chown, path::Path, process::Command, time::Duration};
+use std::{
+    ffi::CString,
+    fs,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::unix::fs::chown,
+    path::Path,
+    process::Command,
+    time::Duration,
+};
 
-use aes_gcm::aead::Aead;
 use clap::Parser;
 use clap::clap_derive::Subcommand;
 use etc_passwd::Passwd;
-use ipnetwork::{Ipv4Network, Ipv6Network};
+use ipnetwork::IpNetwork;
 use patela_client::{api::build_client, tpm::*, *};
-use patela_server::{NetworkConf, TorRelayConf, api::NodeConf};
+use patela_server::{NodeConfig, TorRelayConf};
 use systemctl::SystemCtl;
-use tar::Archive;
 use tss_esapi::{Context, TctiNameConf, handles::KeyHandle};
 
 #[derive(Subcommand, Debug, Clone)]
@@ -32,8 +38,8 @@ enum Commands {
     Start {
         #[arg(long, action, help = "Do not run network setup")]
         skip_net: bool,
-        #[arg(long, action, help = "Do not try to restore backup from server")]
-        skip_backup: bool,
+        #[arg(long, action, help = "Do not try to restore long term keys")]
+        skip_restore: bool,
     },
     /// Mainly for development and basic maintenances
     Tpm {
@@ -67,12 +73,12 @@ async fn main() -> anyhow::Result<()> {
 
     match config.cmd.unwrap_or(Commands::Start {
         skip_net: false,
-        skip_backup: false,
+        skip_restore: false,
     }) {
         Commands::Start {
             skip_net,
-            skip_backup,
-        } => cmd_start(config.server, config.tpm2, skip_net, skip_backup).await,
+            skip_restore,
+        } => cmd_start(config.server, config.tpm2, skip_net, skip_restore).await,
         Commands::Tpm { cmd } => cmd_tpm(cmd, config.tpm2).await,
         Commands::Net { cmd } => cmd_net(cmd).await,
     }
@@ -83,7 +89,7 @@ async fn cmd_start(
     server_url: String,
     tpm2: Option<String>,
     skip_net: bool,
-    skip_backup: bool,
+    skip_restore: bool,
 ) -> anyhow::Result<()> {
     let tpm_device_name = match tpm2 {
         Some(device) => TctiNameConf::Device(device.parse()?),
@@ -131,7 +137,7 @@ async fn cmd_start(
     println!("Succesfuly authenticathed with server");
 
     // Generate or fetch aes key and nonce
-    let (cipher, nonce) = match is_first_run {
+    let (_cipher, _nonce) = match is_first_run {
         true => {
             println!("Generate aes-gcm key and nonce for bkp encryption...");
             generate_aes_cipher_and_store(context, &client, &server_url, &session_token).await
@@ -194,8 +200,6 @@ async fn cmd_start(
         println!("Skip network configuration")
     } else {
         println!("Configure network interfaces...\n");
-        // NOTE: the network configuration is not safe to be called multiple time
-
         // Get tor relay conf
         let node_conf = client
             .get(format!("{}/private/config/resolved/node", server_url))
@@ -203,50 +207,62 @@ async fn cmd_start(
             .send()
             .await?
             .error_for_status()?
-            .json::<NodeConf>()
+            .json::<NodeConfig>()
             .await?;
 
         let (connection, net_handle, _) = rtnetlink::new_connection()?;
         tokio::spawn(connection);
 
+        // TODO: let override this configuration from server
         let interface_index = find_network_interface(&net_handle).await?;
         set_link_up(&net_handle, interface_index).await?;
+
+        println!("Checking existing network addresses...");
+        let links = dump_links(&net_handle).await?;
+
+        let mut addresses: Vec<IpAddr> = Vec::new();
+
+        // Search for every link, dump its addresses
+        for (link_index, _link_name) in links {
+            addresses.extend(dump_addresses(&net_handle, link_index).await?);
+        }
+
+        println!("Configuring relay IP addresses...");
+        for relay in relays.iter() {
+            let relay_ipv4: Ipv4Addr = relay.or_address_v4.parse()?;
+            let relay_ipv6: Ipv6Addr = relay.or_address_v6.parse()?;
+
+            if !addresses.contains(&IpAddr::V4(relay_ipv4)) {
+                println!("Adding IPv4 address {} for relay {}", relay_ipv4, relay.name);
+                let ipv4_network = IpNetwork::new(IpAddr::V4(relay_ipv4), 24)?;
+                add_network_address(interface_index, ipv4_network, &net_handle).await?;
+            } else {
+                println!("IPv4 address {} already configured for relay {}", relay_ipv4, relay.name);
+            }
+
+            if !addresses.contains(&IpAddr::V6(relay_ipv6)) {
+                println!("Adding IPv6 address {} for relay {}", relay_ipv6, relay.name);
+                let ipv6_network = IpNetwork::new(IpAddr::V6(relay_ipv6), 48)?;
+                add_network_address(interface_index, ipv6_network, &net_handle).await?;
+            } else {
+                println!("IPv6 address {} already configured for relay {}", relay_ipv6, relay.name);
+            }
+        }
 
         // add default route only after
         add_default_route_v4(node_conf.network.ipv4_gateway.parse()?, &net_handle).await?;
         add_default_route_v6(node_conf.network.ipv6_gateway.parse()?, &net_handle).await?;
     }
 
-    if !is_first_run && !skip_backup {
+    if !is_first_run && !skip_restore {
         println!("Fetch tor keys backup");
 
         for relay in relays.iter() {
-            // Get tor relay conf
-            let data: Vec<u8> = client
-                .get(format!("{}/private/relays/data/{}", server_url, relay.name))
-                .bearer_auth(&session_token)
-                .send()
-                .await?
-                .error_for_status()?
-                .bytes()
-                .await?
-                .into();
-
-            let archive_bkp = cipher.decrypt(&nonce.into(), data.as_slice()).unwrap();
-
-            println!("Put keys in place");
-
-            let mut archive_bkp = Archive::new(archive_bkp.as_slice());
-            archive_bkp.set_overwrite(true);
-            archive_bkp.set_preserve_ownerships(true);
-            archive_bkp.set_preserve_mtime(true);
-            archive_bkp.set_preserve_permissions(true);
+            // TODO: restore key from the tpm
 
             let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
                 .join(&relay.name)
                 .join("keys");
-
-            archive_bkp.unpack(&keys_dir)?;
 
             let uid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
                 .unwrap()
@@ -269,7 +285,7 @@ async fn cmd_start(
     println!("\nStart services");
 
     for relay in relays.iter() {
-        let _ = systemctl.start(format!("tor@{}.service", relay.name).as_ref());
+        let _ = systemctl.reload_or_restart(format!("tor@{}.service", relay.name).as_ref());
     }
 
     let wait_seconds = 5;
@@ -278,22 +294,7 @@ async fn cmd_start(
     tokio::time::sleep(Duration::from_secs(wait_seconds)).await;
 
     for relay in relays.iter() {
-        println!("Backup {}", relay.name);
-        let archive_bkp = backup_tor_keys(&relay.name)?;
-
-        std::fs::write(format!("./{}", relay.name), &archive_bkp)?;
-
-        let encrypted_bkp = cipher
-            .encrypt(&nonce.into(), archive_bkp.as_slice())
-            .unwrap();
-
-        let _ = client
-            .post(format!("{}/private/relays/data/{}", server_url, relay.name))
-            .bearer_auth(&session_token)
-            .body(encrypted_bkp)
-            .send()
-            .await?
-            .error_for_status()?;
+        // TODO: backup in tpm
     }
 
     Ok(())
@@ -344,7 +345,24 @@ async fn cmd_net(config: NetCommands) -> anyhow::Result<()> {
     match config {
         NetCommands::Add => {}
         NetCommands::List => {
-            let _ = find_network_interface(&handle).await.unwrap();
+            println!("=== Network Links and Addresses ===\n");
+
+            // Get all network links
+            let links = dump_links(&handle).await?;
+
+            // For each link, dump its addresses
+            for (link_index, link_name) in links {
+                println!("\nAddresses for link {} ({}):", link_index, link_name);
+                let addresses = dump_addresses(&handle, link_index).await?;
+
+                if addresses.is_empty() {
+                    println!("  (no addresses)");
+                } else {
+                    for address in addresses {
+                        println!("  {}", address);
+                    }
+                }
+            }
         }
     }
 
