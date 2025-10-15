@@ -11,8 +11,9 @@ DROP TABLE IF EXISTS datas;
 -- Add tor_conf field to relays table
 ALTER TABLE relays ADD COLUMN tor_conf TEXT;
 
--- Add tor_conf field to nodes table  
+-- Add tor_conf and node_conf field to nodes table  
 ALTER TABLE nodes ADD COLUMN tor_conf TEXT;
+ALTER TABLE nodes ADD COLUMN node_conf TEXT;
 
 -- Create global_conf table
 CREATE TABLE IF NOT EXISTS global_conf

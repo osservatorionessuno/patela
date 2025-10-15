@@ -6,7 +6,7 @@ use clap::clap_derive::Subcommand;
 use etc_passwd::Passwd;
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use patela_client::{api::build_client, tpm::*, *};
-use patela_server::api::{ApiNodeCreateResponse, ApiRelaysResponse};
+use patela_server::{NetworkConf, TorRelayConf, api::NodeConf};
 use systemctl::SystemCtl;
 use tar::Archive;
 use tss_esapi::{Context, TctiNameConf, handles::KeyHandle};
@@ -108,15 +108,15 @@ async fn cmd_start(
     let client = build_client().await?;
 
     if is_first_run {
-        let node = client
+        let node_id = client
             .post(format!("{}/public/create", server_url))
             .send()
             .await?
             .error_for_status()?
-            .json::<ApiNodeCreateResponse>()
+            .json::<i64>()
             .await?;
 
-        println!("Create new node on the server with id {}", node.id);
+        println!("Create new node on the server with id {}", node_id);
     }
 
     // Authenticate with server
@@ -159,16 +159,14 @@ async fn cmd_start(
     println!("Fetch relays conf");
 
     // Get tor relay conf
-    let tor_conf = client
+    let relays = client
         .get(format!("{}/private/relays", server_url))
         .bearer_auth(&session_token)
         .send()
         .await?
         .error_for_status()?
-        .json::<ApiRelaysResponse>()
+        .json::<Vec<TorRelayConf>>()
         .await?;
-
-    let relays = tor_conf.relays;
 
     for relay in relays.iter() {
         println!("{}", relay);
@@ -196,6 +194,17 @@ async fn cmd_start(
         println!("Skip network configuration")
     } else {
         println!("Configure network interfaces...\n");
+        // NOTE: the network configuration is not safe to be called multiple time
+
+        // Get tor relay conf
+        let node_conf = client
+            .get(format!("{}/private/config/resolved/node", server_url))
+            .bearer_auth(&session_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<NodeConf>()
+            .await?;
 
         let (connection, net_handle, _) = rtnetlink::new_connection()?;
         tokio::spawn(connection);
@@ -203,43 +212,9 @@ async fn cmd_start(
         let interface_index = find_network_interface(&net_handle).await?;
         set_link_up(&net_handle, interface_index).await?;
 
-        // use the relay positition for snat tagging
-        for relay in relays.iter() {
-            add_network_address(
-                interface_index,
-                Ipv4Network::new(relay.or_address_v4.parse()?, tor_conf.network.ipv4_prefix)?
-                    .into(),
-                &net_handle,
-            )
-            .await?;
-            add_network_address(
-                interface_index,
-                Ipv6Network::new(relay.or_address_v6.parse()?, tor_conf.network.ipv6_prefix)?
-                    .into(),
-                &net_handle,
-            )
-            .await?;
-
-            let uid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
-                .unwrap()
-                .uid;
-
-            println!("Configure source ips for uid {}:", relay.name);
-            println!("\t{}", relay.or_address_v4);
-            println!("\t{}", relay.or_address_v6);
-
-            set_source_ip_by_process(
-                interface_index,
-                uid,
-                uid.try_into()?,
-                relay.or_address_v4.parse()?,
-                relay.or_address_v6.parse()?,
-            )?;
-        }
-
         // add default route only after
-        add_default_route_v4(tor_conf.network.ipv4_gateway.parse()?, &net_handle).await?;
-        add_default_route_v6(tor_conf.network.ipv6_gateway.parse()?, &net_handle).await?;
+        add_default_route_v4(node_conf.network.ipv4_gateway.parse()?, &net_handle).await?;
+        add_default_route_v6(node_conf.network.ipv6_gateway.parse()?, &net_handle).await?;
     }
 
     if !is_first_run && !skip_backup {

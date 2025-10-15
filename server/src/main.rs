@@ -15,7 +15,7 @@ use biscuit_auth::{Biscuit, PrivateKey, PublicKey, macros::biscuit};
 use clap::{Args, Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 use log::info;
-use patela_server::{api::*, db::*, tor_config::TorConfigParser, *};
+use patela_server::{db::*, tor_config::TorConfigParser, *};
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -23,7 +23,7 @@ use rustls::{
 };
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use sha256::digest;
-use std::{any::Any, env, fs::File, io::BufReader, path::PathBuf, sync::Arc};
+use std::{any::Any, fs::File, io::BufReader, path::PathBuf, sync::Arc};
 use x509_parser::nom::AsBytes;
 
 use actix_web::error::ErrorInternalServerError;
@@ -193,11 +193,11 @@ async fn create(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<
     // TODO: replace cert with public ek key of the tpm
     let cert_digest = digest(client_cert);
 
-    Ok(Json(ApiNodeCreateResponse {
-        id: create_node(&app.db, &cert_digest)
+    Ok(Json(
+        create_node(&app.db, &cert_digest)
             .await
             .map_err(ErrorInternalServerError)?,
-    }))
+    ))
 }
 
 #[get("/auth")]
@@ -232,14 +232,16 @@ async fn auth(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<im
     Ok(HttpResponse::Ok().body(payload))
 }
 
-#[get("/relays")]
+#[get("/config/node")]
 async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<impl Responder> {
     let node_id = node_id_from_request(&req, app.biscuit_root.public())
         .await
         .map_err(ErrorNotFound)?;
 
     // look for relays already created
-    let mut tor_relays = get_relays(&app.db, node_id).await.map_err(ErrorNotFound)?;
+    let mut tor_relays = get_relays_conf(&app.db, node_id)
+        .await
+        .map_err(ErrorNotFound)?;
 
     // Relay conf are created lazy
     if tor_relays.is_empty() {
@@ -260,7 +262,7 @@ async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<
                 .await
                 .map_err(ErrorInternalServerError)?;
 
-            let _ = create_relay(
+            let relay_id = create_relay(
                 &app.db,
                 node_id,
                 cheese_id,
@@ -269,68 +271,35 @@ async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<
             )
             .await
             .map_err(ErrorInternalServerError)?;
+
+            let _resolved_conf = get_resolved_relay_conf(&app.db, node_id, relay_id)
+                .await
+                .map_err(ErrorInternalServerError)?;
         }
+
         // Reload relays from db, this is redundand and can be done in the create
-        tor_relays = get_relays(&app.db, node_id)
+        tor_relays = get_relays_conf(&app.db, node_id)
             .await
             .map_err(ErrorInternalServerError)?;
     }
 
-    // NOTE: assume gigabit port, maybe the client should decide on this
-    let relay_rate = 30;
-    let relay_burst = 80; // burst should be at least same than rate
+    Ok(Json(tor_relays))
+}
 
-    // NOTE: we don't put effort on calculate the family from db because we are waiting for `happy
-    // family` feature from tor
-    let relays_family = env::var("PATELA_RELAY_FAMILY").unwrap_or("".to_string());
+#[get("/config/resolved/node")]
+async fn get_config_node(
+    app: Data<PatelaServer>,
+    req: HttpRequest,
+) -> actix_web::Result<impl Responder> {
+    let node_id = node_id_from_request(&req, app.biscuit_root.public())
+        .await
+        .map_err(ErrorNotFound)?;
 
-    let relay_policy = vec![
-        TorPolicy {
-            verb: TorPolicyVerb::Reject,
-            object: "0.0.0.0/8:*".to_string(),
-        },
-        TorPolicy {
-            verb: TorPolicyVerb::Reject,
-            object: String::from("169.254.0.0/16:*"),
-        },
-        TorPolicy {
-            verb: TorPolicyVerb::Reject,
-            object: String::from("10.0.0.0/8:*"),
-        },
-        TorPolicy {
-            verb: TorPolicyVerb::Reject,
-            object: String::from("*:25"),
-        },
-        TorPolicy {
-            verb: TorPolicyVerb::Accept,
-            object: String::from("*:*"),
-        },
-    ];
-
-    let relays_conf = tor_relays
-        .iter()
-        .map(|elem| TorRelayConf {
-            name: elem.name.clone(),
-            family: relays_family.clone(),
-            policy: relay_policy.clone(),
-            bandwidth_rate: relay_rate,
-            bandwidth_burst: relay_burst,
-            or_port: RELAY_OR_PORT,
-            or_address_v4: elem.ip_v4.clone(),
-            or_address_v6: elem.ip_v6.clone(),
-        })
-        .collect::<Vec<TorRelayConf>>();
-
-    Ok(Json(ApiRelaysResponse {
-        network: NetworkConf {
-            ipv4_gateway: GATEWAY_V4.to_string(),
-            ipv4_prefix: *PREFIX_V4,
-            ipv6_gateway: GATEWAY_V6.to_string(),
-            ipv6_prefix: *PREFIX_V6,
-            dns_server: DNS_SERVER.to_string(),
-        },
-        relays: relays_conf,
-    }))
+    Ok(Json(
+        get_resolved_node_conf(&app.db, node_id)
+            .await
+            .map_err(ErrorInternalServerError)?,
+    ))
 }
 
 #[post("/specs")]
@@ -510,7 +479,7 @@ async fn main() -> anyhow::Result<()> {
 
                 println!("Relays:");
 
-                for relay in get_relays(&pool, node.id).await? {
+                for relay in get_relays_conf(&pool, node.id).await? {
                     println!("\t{}\t\t{}\t{}", relay.name, relay.ip_v4, relay.ip_v6);
                 }
             }
