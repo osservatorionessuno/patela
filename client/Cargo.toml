@@ -7,7 +7,7 @@ edition = "2024"
 patela-server = { path = "../server" }
 anyhow = "1.0.100"
 clap = { version = "4.5.48", features = ["derive"] }
-flate2 = "1.1.2"
+flate2 = "1.1.4"
 lazy_static = "1.5.0"
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
 sysinfo = { version = "0.37", features = ["serde"] }

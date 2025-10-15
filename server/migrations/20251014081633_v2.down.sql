@@ -8,8 +8,9 @@ ALTER TABLE relays ADD COLUMN fingerprint TEXT;
 -- Remove tor_conf column from nodes table
 ALTER TABLE nodes DROP COLUMN tor_conf;
 
--- Remove tor_conf column from relays table
+-- Remove tor_conf and node_conf column from relays table
 ALTER TABLE relays DROP COLUMN tor_conf;
+ALTER TABLE relays DROP COLUMN node_conf;
 
 -- Recreate datas table
 CREATE TABLE IF NOT EXISTS datas

@@ -1,31 +1,49 @@
-use crate::{HwSpecs, PREFIX_V4, tor_config::TorConfig};
+use crate::{HwSpecs, NodeConfig, tor_config::TorConfig};
 use anyhow::{anyhow, bail};
 use chrono::Local;
 use ipnetwork::Ipv4Network;
+use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::{
+    env,
     net::{Ipv4Addr, Ipv6Addr},
     str::FromStr,
 };
 
-/// What in the db? Why the db?
-///
-/// - list of valid relay names
-/// - assigned ip to relay
-/// - default global conf
-/// - node conf overrides
-/// - relay conf overrides
-/// - encrypted bkp from the relay
-/// - encrypted bkp keys and nonce from the relay
-///
-/// For our need the db could be a very simple fs/file db, probably we don't need to do real sql
-/// query, but the life is to short to learn another db? A valid alternative could be to have an fs
-/// db with all the configuration and just file blobs dropped around.
-///
-const FIRST_IP_4: Ipv4Addr = Ipv4Addr::new(64, 190, 76, 10);
-const FIRST_IP_6: Ipv6Addr = Ipv6Addr::new(0x2001, 0x67c, 0xe28, 0x1, 0, 0, 0, 0x100);
+// What in the db? Why the db?
+//
+// - list of valid relay names
+// - assigned ip to relay
+// - default global conf
+// - node conf overrides
+// - relay conf overrides
+//
+// For our need the db could be a very simple fs/file db, probably we don't need to do real sql
+// query, but the life is to short to learn another db? A valid alternative could be to have an fs
+// db with all the configuration and just file blobs dropped around.
 
-#[derive(Debug)]
+// TODO: extend db conf to handle multiple ip pools
+lazy_static! {
+    static ref FIRST_IP_4: Ipv4Addr = env::var("PATELA_FIRST_V4")
+        .unwrap_or_else(|_| "64.190.76.10".to_string())
+        .parse()
+        .unwrap();
+    static ref FIRST_IP_6: Ipv6Addr = env::var("PATELA_FIRST_V6")
+        .unwrap_or_else(|_| "2001:67c:e28:1::102".to_string())
+        .parse()
+        .unwrap();
+    static ref PREFIX_V4: u8 = env::var("PATELA_PREFIX_V4")
+        .unwrap_or_else(|_| "24".to_string())
+        .parse()
+        .unwrap();
+    static ref PREFIX_V6: u8 = env::var("PATELA_PREFIX_V6")
+        .unwrap_or_else(|_| "48".to_string())
+        .parse()
+        .unwrap();
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NodeRecord {
     pub id: i64,
     pub cert: String,
@@ -34,7 +52,7 @@ pub struct NodeRecord {
 }
 
 // Define a struct for the relay data
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RelayRecord {
     pub id: i64,
     pub node_id: i64,
@@ -43,7 +61,6 @@ pub struct RelayRecord {
     pub date: String,
     pub ip_v4: String,
     pub ip_v6: String,
-    pub fingerprint: Option<String>,
     pub tor_conf: Option<TorConfig>,
 }
 
@@ -169,7 +186,7 @@ WHERE node_id = ? AND cheeses.name = ?
     Ok(res.id)
 }
 
-pub async fn get_relays(pool: &SqlitePool, node_id: i64) -> anyhow::Result<Vec<RelayRecord>> {
+pub async fn get_relays_conf(pool: &SqlitePool, node_id: i64) -> anyhow::Result<Vec<RelayRecord>> {
     let mut conn = pool.acquire().await?;
 
     let rows = sqlx::query!(
@@ -201,7 +218,6 @@ WHERE node_id = ?
                 date: row.date,
                 ip_v4: row.ip_v4,
                 ip_v6: row.ip_v6,
-                fingerprint: None, // v2 removed fingerprint tracking
                 tor_conf,
             }
         })
@@ -321,14 +337,14 @@ SELECT ip_v4, ip_v6 FROM relays
 
     let next_ip_v4 = match ips_v4.last() {
         Some(last) => Ipv4Addr::from_bits(last.to_bits() + 1),
-        None => FIRST_IP_4,
+        None => *FIRST_IP_4,
     };
 
-    let net_v4 = Ipv4Network::new(FIRST_IP_4, *PREFIX_V4)?;
+    let net_v4 = Ipv4Network::new(*FIRST_IP_4, *PREFIX_V4)?;
 
     let next_ip_v6 = match ips_v6.last() {
         Some(last) => Ipv6Addr::from_bits(last.to_bits() + 1),
-        None => FIRST_IP_6,
+        None => *FIRST_IP_6,
     };
 
     // Check if there is room for another ip in the networks, we assume that ipv4 finish first and
@@ -338,6 +354,46 @@ SELECT ip_v4, ip_v6 FROM relays
     };
 
     Ok((next_ip_v4, next_ip_v6))
+}
+
+/// Set or update the global default NodeConfig
+pub async fn set_global_node_conf(pool: &SqlitePool, conf: &NodeConfig) -> anyhow::Result<()> {
+    let mut conn = pool.acquire().await?;
+    let json = serde_json::to_string(conf)?;
+
+    // Global config always has id=1
+    let _ = sqlx::query!(
+        r#"
+INSERT INTO global_conf (id, node_conf) VALUES (1, ?1)
+ON CONFLICT(id) DO UPDATE SET node_conf = ?1
+        "#,
+        json
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+/// Get the global default NodeConfig
+pub async fn get_global_node_conf(pool: &SqlitePool) -> anyhow::Result<Option<NodeConfig>> {
+    let mut conn = pool.acquire().await?;
+
+    let row = sqlx::query!(
+        r#"
+SELECT node_conf FROM global_conf WHERE id = 1
+        "#
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    match row {
+        Some(r) => match r.node_conf {
+            Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+            None => Ok(None),
+        },
+        None => Ok(None),
+    }
 }
 
 /// Set or update the global default TorConfig
@@ -376,6 +432,47 @@ SELECT tor_conf FROM global_conf WHERE id = 1
             Some(json) => Ok(Some(serde_json::from_str(&json)?)),
             None => Ok(None),
         },
+        None => Ok(None),
+    }
+}
+
+/// Set or update the NodeConfig override for a specific node
+pub async fn set_node_node_conf(
+    pool: &SqlitePool,
+    node_id: i64,
+    conf: &NodeConfig,
+) -> anyhow::Result<()> {
+    let mut conn = pool.acquire().await?;
+    let json = serde_json::to_string(conf)?;
+
+    let _ = sqlx::query!(
+        r#"
+UPDATE nodes SET node_conf = ?1 WHERE id = ?2
+        "#,
+        json,
+        node_id
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+/// Get the TorConfig override for a specific node
+pub async fn get_node_conf(pool: &SqlitePool, node_id: i64) -> anyhow::Result<Option<NodeConfig>> {
+    let mut conn = pool.acquire().await?;
+
+    let row = sqlx::query!(
+        r#"
+SELECT node_conf FROM nodes WHERE id = ?
+        "#,
+        node_id
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    match row.node_conf {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
         None => Ok(None),
     }
 }
@@ -505,6 +602,22 @@ fn merge_tor_configs(
     merged
 }
 
+/// Get the fully resolved NodeConfig for a node, falling back to global if not set
+pub async fn get_resolved_node_conf(pool: &SqlitePool, node_id: i64) -> anyhow::Result<NodeConfig> {
+    // Try to get node-specific config first
+    if let Some(conf) = get_node_conf(pool, node_id).await? {
+        return Ok(conf);
+    }
+
+    // Fall back to global node config
+    if let Some(conf) = get_global_node_conf(pool).await? {
+        return Ok(conf);
+    }
+
+    // If neither exists, return an error
+    anyhow::bail!("No node configuration found for node {}", node_id)
+}
+
 /// Get the fully resolved TorConfig for a relay, merging global, node, and relay configs
 pub async fn get_resolved_relay_conf(
     pool: &SqlitePool,
@@ -526,13 +639,7 @@ pub async fn get_resolved_relay_conf(
 mod tests {
     use sqlx::SqlitePool;
 
-    use crate::{
-        db::{
-            FIRST_IP_4, FIRST_IP_6, create_node, find_next_ips, get_global_tor_conf,
-            get_resolved_relay_conf, set_global_tor_conf, set_node_tor_conf, set_relay_tor_conf,
-        },
-        tor_config::TorConfigParser,
-    };
+    use crate::{HwSpecs, NetworkConf, NodeConfig, db::*, tor_config::TorConfigParser};
 
     #[sqlx::test]
     async fn test_create_node(pool: SqlitePool) -> sqlx::Result<()> {
@@ -545,8 +652,8 @@ mod tests {
     async fn test_find_ips(pool: SqlitePool) -> sqlx::Result<()> {
         let (ipv4, ipv6) = find_next_ips(&pool).await.unwrap();
 
-        assert_eq!(ipv4, FIRST_IP_4);
-        assert_eq!(ipv6, FIRST_IP_6);
+        assert_eq!(ipv4, *FIRST_IP_4);
+        assert_eq!(ipv6, *FIRST_IP_6);
 
         Ok(())
     }
@@ -618,6 +725,431 @@ ControlPort 9999
             resolved.get_data_directory().unwrap().as_string(),
             Some("/var/lib/tor")
         );
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_get_nodes(pool: SqlitePool) -> sqlx::Result<()> {
+        // Create multiple nodes
+        let _ = create_node(&pool, "cert1").await.unwrap();
+        let _ = create_node(&pool, "cert2").await.unwrap();
+        let _ = create_node(&pool, "cert3").await.unwrap();
+
+        let nodes = get_nodes(&pool).await.unwrap();
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].cert, "cert1");
+        assert_eq!(nodes[1].cert, "cert2");
+        assert_eq!(nodes[2].cert, "cert3");
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_get_node_by_cert(pool: SqlitePool) -> sqlx::Result<()> {
+        let node_id = create_node(&pool, "unique_cert").await.unwrap();
+
+        let node = get_node_by_cert(&pool, "unique_cert").await.unwrap();
+        assert_eq!(node.id, node_id);
+        assert_eq!(node.cert, "unique_cert");
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_remove_node(pool: SqlitePool) -> sqlx::Result<()> {
+        let node_id = create_node(&pool, "to_delete").await.unwrap();
+
+        // Node exists
+        let node = get_node_by_cert(&pool, "to_delete").await;
+        assert!(node.is_ok());
+
+        // Remove the node
+        remove_node(&pool, node_id).await.unwrap();
+
+        // Node should not exist anymore
+        let node = get_node_by_cert(&pool, "to_delete").await;
+        assert!(node.is_err());
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_find_ips_incremental(pool: SqlitePool) -> sqlx::Result<()> {
+        let node_id = create_node(&pool, "test_node").await.unwrap();
+
+        // Get first IPs
+        let (ipv4_1, ipv6_1) = find_next_ips(&pool).await.unwrap();
+        let (cheese_id_1, _) = allocate_cheese(&pool).await.unwrap();
+        create_relay(
+            &pool,
+            node_id,
+            cheese_id_1,
+            &ipv4_1.to_string(),
+            &ipv6_1.to_string(),
+        )
+        .await
+        .unwrap();
+
+        // Get next IPs - should be incremented
+        let (ipv4_2, ipv6_2) = find_next_ips(&pool).await.unwrap();
+        assert_eq!(ipv4_2.to_bits(), ipv4_1.to_bits() + 1);
+        assert_eq!(ipv6_2.to_bits(), ipv6_1.to_bits() + 1);
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_allocate_cheese(pool: SqlitePool) -> sqlx::Result<()> {
+        let (cheese_id_1, name_1) = allocate_cheese(&pool).await.unwrap();
+        assert!(cheese_id_1 > 0);
+        assert!(!name_1.is_empty());
+
+        // Allocate another cheese - should be different
+        let (cheese_id_2, name_2) = allocate_cheese(&pool).await.unwrap();
+        assert_ne!(cheese_id_1, cheese_id_2);
+        assert_ne!(name_1, name_2);
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_create_and_get_relay(pool: SqlitePool) -> sqlx::Result<()> {
+        let node_id = create_node(&pool, "relay_node").await.unwrap();
+        let (cheese_id, cheese_name) = allocate_cheese(&pool).await.unwrap();
+
+        let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1")
+            .await
+            .unwrap();
+        assert!(relay_id > 0);
+
+        // Get relay by name
+        let found_relay_id = get_relay_by_name(&pool, node_id, &cheese_name)
+            .await
+            .unwrap();
+        assert_eq!(relay_id, found_relay_id);
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_get_relays_conf(pool: SqlitePool) -> sqlx::Result<()> {
+        let node_id = create_node(&pool, "multi_relay_node").await.unwrap();
+
+        // Create multiple relays for this node
+        let (cheese_id_1, _) = allocate_cheese(&pool).await.unwrap();
+        let (cheese_id_2, _) = allocate_cheese(&pool).await.unwrap();
+
+        create_relay(&pool, node_id, cheese_id_1, "10.0.0.1", "::1")
+            .await
+            .unwrap();
+        create_relay(&pool, node_id, cheese_id_2, "10.0.0.2", "::2")
+            .await
+            .unwrap();
+
+        let relays = get_relays_conf(&pool, node_id).await.unwrap();
+        assert_eq!(relays.len(), 2);
+        assert_eq!(relays[0].node_id, node_id);
+        assert_eq!(relays[1].node_id, node_id);
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_node_specs(pool: SqlitePool) -> sqlx::Result<()> {
+        let node_id = create_node(&pool, "spec_node").await.unwrap();
+
+        let specs = HwSpecs {
+            memory: 16_000_000_000,
+            n_cpus: 8,
+            cpu_freqz: 3_200_000_000,
+            cpu_name: "Test CPU".to_string(),
+        };
+
+        let spec_id = create_node_spec(&pool, node_id, &specs).await.unwrap();
+        assert!(spec_id > 0);
+
+        let retrieved_specs = get_last_node_spec(&pool, node_id).await.unwrap();
+        assert_eq!(retrieved_specs.memory, specs.memory);
+        assert_eq!(retrieved_specs.n_cpus, specs.n_cpus);
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_global_node_conf(pool: SqlitePool) -> sqlx::Result<()> {
+        let conf = NodeConfig {
+            network: NetworkConf {
+                ipv4_gateway: "10.0.0.1".to_string(),
+                ipv6_gateway: "fe80::1".to_string(),
+                dns_server: "8.8.8.8".to_string(),
+            },
+        };
+
+        // Initially should be None
+        let initial = get_global_node_conf(&pool).await.unwrap();
+        assert!(initial.is_none());
+
+        // Set global config
+        set_global_node_conf(&pool, &conf).await.unwrap();
+
+        // Retrieve and verify
+        let retrieved = get_global_node_conf(&pool).await.unwrap();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.network.ipv4_gateway, "10.0.0.1");
+        assert_eq!(retrieved.network.ipv6_gateway, "fe80::1");
+        assert_eq!(retrieved.network.dns_server, "8.8.8.8");
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_node_node_conf(pool: SqlitePool) -> sqlx::Result<()> {
+        let node_id = create_node(&pool, "conf_node").await.unwrap();
+
+        let conf = NodeConfig {
+            network: NetworkConf {
+                ipv4_gateway: "192.168.1.1".to_string(),
+                ipv6_gateway: "fe80::2".to_string(),
+                dns_server: "1.1.1.1".to_string(),
+            },
+        };
+
+        // Initially should be None
+        let initial = get_node_conf(&pool, node_id).await.unwrap();
+        assert!(initial.is_none());
+
+        // Set node config
+        set_node_node_conf(&pool, node_id, &conf).await.unwrap();
+
+        // Retrieve and verify
+        let retrieved = get_node_conf(&pool, node_id).await.unwrap();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.network.ipv4_gateway, "192.168.1.1");
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_global_tor_conf(pool: SqlitePool) -> sqlx::Result<()> {
+        let torrc = r#"
+SocksPort 9050
+ControlPort 9051
+DataDirectory /var/lib/tor
+        "#;
+
+        let conf = TorConfigParser::parse(torrc).unwrap();
+
+        // Set global tor config
+        set_global_tor_conf(&pool, &conf).await.unwrap();
+
+        // Retrieve and verify
+        let retrieved = get_global_tor_conf(&pool).await.unwrap();
+        assert!(retrieved.is_some());
+        assert_eq!(
+            retrieved.unwrap().get_socks_port().unwrap().as_i64(),
+            Some(9050)
+        );
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_node_tor_conf(pool: SqlitePool) -> sqlx::Result<()> {
+        let node_id = create_node(&pool, "tor_conf_node").await.unwrap();
+
+        let torrc = r#"
+SocksPort 9150
+        "#;
+        let conf = TorConfigParser::parse(torrc).unwrap();
+
+        // Set node tor config
+        set_node_tor_conf(&pool, node_id, &conf).await.unwrap();
+
+        // Retrieve and verify
+        let retrieved = get_node_tor_conf(&pool, node_id).await.unwrap();
+        assert!(retrieved.is_some());
+        assert_eq!(
+            retrieved.unwrap().get_socks_port().unwrap().as_i64(),
+            Some(9150)
+        );
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_relay_tor_conf(pool: SqlitePool) -> sqlx::Result<()> {
+        let node_id = create_node(&pool, "relay_conf_node").await.unwrap();
+        let (cheese_id, _) = allocate_cheese(&pool).await.unwrap();
+        let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1")
+            .await
+            .unwrap();
+
+        let torrc = r#"
+ControlPort 9999
+        "#;
+        let conf = TorConfigParser::parse(torrc).unwrap();
+
+        // Set relay tor config
+        set_relay_tor_conf(&pool, relay_id, &conf).await.unwrap();
+
+        // Retrieve and verify
+        let retrieved = get_relay_tor_conf(&pool, relay_id).await.unwrap();
+        assert!(retrieved.is_some());
+        // Verify ControlPort is set to 9999
+        let control_port = retrieved
+            .unwrap()
+            .directives
+            .get("ControlPort")
+            .and_then(|v| v.first())
+            .and_then(|v| v.as_i64());
+        assert_eq!(control_port, Some(9999));
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_resolved_node_conf_fallback(pool: SqlitePool) -> sqlx::Result<()> {
+        // Set global node config
+        let global_conf = NodeConfig {
+            network: NetworkConf {
+                ipv4_gateway: "10.0.0.1".to_string(),
+                ipv6_gateway: "fe80::1".to_string(),
+                dns_server: "8.8.8.8".to_string(),
+            },
+        };
+        set_global_node_conf(&pool, &global_conf).await.unwrap();
+
+        // Create a node without specific config
+        let node_id = create_node(&pool, "fallback_node").await.unwrap();
+
+        // Should fall back to global config
+        let resolved = get_resolved_node_conf(&pool, node_id).await.unwrap();
+        assert_eq!(resolved.network.ipv4_gateway, "10.0.0.1");
+
+        // Now set node-specific config
+        let node_conf = NodeConfig {
+            network: NetworkConf {
+                ipv4_gateway: "192.168.1.1".to_string(),
+                ipv6_gateway: "fe80::2".to_string(),
+                dns_server: "1.1.1.1".to_string(),
+            },
+        };
+        set_node_node_conf(&pool, node_id, &node_conf)
+            .await
+            .unwrap();
+
+        // Should use node-specific config
+        let resolved = get_resolved_node_conf(&pool, node_id).await.unwrap();
+        assert_eq!(resolved.network.ipv4_gateway, "192.168.1.1");
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_resolved_node_conf_no_config(pool: SqlitePool) -> sqlx::Result<()> {
+        let node_id = create_node(&pool, "no_conf_node").await.unwrap();
+
+        // Should fail since there's no global or node-specific config
+        let result = get_resolved_node_conf(&pool, node_id).await;
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_resolved_relay_conf_from_real_torrc(pool: SqlitePool) -> sqlx::Result<()> {
+        // Parse real torrc configuration as global config
+        let global_torrc = r#"
+Nickname testnode
+AvoidDiskWrites 1
+DisableAllSwap 1
+RelayBandwidthRate 40 MB
+RelayBandwidthBurst 80 MB
+MaxMemInQueues 400 MB
+ContactInfo email:info[]example.org url:https://example.org
+MyFamily ABCD1234567890ABCDEF1234567890ABCDEF1234,1234567890ABCDEF1234567890ABCDEF12345678
+ExitPolicy reject 0.0.0.0/8:*
+ExitPolicy reject 169.254.0.0/16:*
+ExitPolicy reject 10.0.0.0/8:*
+ExitPolicy reject *:25
+ExitPolicy accept *:*
+ExitRelay 1
+IPv6Exit 1
+        "#;
+
+        let global_conf = TorConfigParser::parse(global_torrc).unwrap();
+        set_global_tor_conf(&pool, &global_conf).await.unwrap();
+
+        // Create a node with node-specific override (disable AvoidDiskWrites)
+        let node_id = create_node(&pool, "test_node").await.unwrap();
+        let node_torrc = r#"
+AvoidDiskWrites 0
+        "#;
+        let node_conf = TorConfigParser::parse(node_torrc).unwrap();
+        set_node_tor_conf(&pool, node_id, &node_conf).await.unwrap();
+
+        // Create a relay with relay-specific bandwidth override
+        let (cheese_id, _) = allocate_cheese(&pool).await.unwrap();
+        let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1")
+            .await
+            .unwrap();
+
+        let relay_torrc = r#"
+RelayBandwidthBurst 150 MB
+        "#;
+        let relay_conf = TorConfigParser::parse(relay_torrc).unwrap();
+        set_relay_tor_conf(&pool, relay_id, &relay_conf)
+            .await
+            .unwrap();
+
+        // Get resolved config (should merge all three levels)
+        let resolved = get_resolved_relay_conf(&pool, node_id, relay_id)
+            .await
+            .unwrap();
+
+        // Verify merged configuration
+        // AvoidDiskWrites should be 0 (node override)
+        let avoid_disk = resolved.directives.get("AvoidDiskWrites").unwrap();
+        assert_eq!(avoid_disk[0].as_bool(), Some(false));
+
+        // RelayBandwidthBurst should be 150 MB (relay override)
+        let relay_bw_burst = resolved.directives.get("RelayBandwidthBurst").unwrap();
+        assert_eq!(relay_bw_burst[0].as_string(), Some("150 MB"));
+
+        // Global config values should be present
+        let nickname = resolved.directives.get("Nickname").unwrap();
+        assert_eq!(nickname[0].as_string(), Some("testnode"));
+
+        let relay_bw_rate = resolved.directives.get("RelayBandwidthRate").unwrap();
+        assert_eq!(relay_bw_rate[0].as_string(), Some("40 MB"));
+
+        let max_mem = resolved.directives.get("MaxMemInQueues").unwrap();
+        assert_eq!(max_mem[0].as_string(), Some("400 MB"));
+
+        // Verify ExitPolicy from global config
+        let exit_policy = resolved.directives.get("ExitPolicy").unwrap();
+        assert_eq!(exit_policy.len(), 5);
+        assert_eq!(exit_policy[0].as_string(), Some("reject 0.0.0.0/8:*"));
+        assert_eq!(exit_policy[4].as_string(), Some("accept *:*"));
+
+        // Verify ContactInfo from global
+        let contact_info = resolved.directives.get("ContactInfo").unwrap();
+        assert!(contact_info[0].as_string().unwrap().contains("example.org"));
+
+        // Verify MyFamily from global
+        let my_family = resolved.directives.get("MyFamily").unwrap();
+        let family_str = my_family[0].as_string().unwrap();
+        assert!(family_str.contains("ABCD1234567890ABCDEF1234567890ABCDEF1234"));
+
+        // Verify boolean values from global
+        let exit_relay = resolved.directives.get("ExitRelay").unwrap();
+        assert_eq!(exit_relay[0].as_bool(), Some(true));
+
+        let ipv6_exit = resolved.directives.get("IPv6Exit").unwrap();
+        assert_eq!(ipv6_exit[0].as_bool(), Some(true));
 
         Ok(())
     }
