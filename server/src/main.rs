@@ -14,6 +14,7 @@ use actix_web_httpauth::{extractors::bearer::BearerAuth, middleware::HttpAuthent
 use biscuit_auth::{Biscuit, PrivateKey, PublicKey, macros::biscuit};
 use clap::{Args, Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
+use colored::Colorize;
 use log::info;
 use patela_server::{db::*, tor_config::TorConfigParser, *};
 use rustls::{
@@ -75,9 +76,17 @@ enum CmdVerbScope {
     /// Fallback configuration for all the relays
     Default,
     /// Node-specific configuration override
-    Node,
+    Node {
+        /// Node ID
+        #[arg(long)]
+        node_id: i64,
+    },
     /// Relay-specific configuration override
-    Relay,
+    Relay {
+        /// Relay name (cheese name)
+        #[arg(long)]
+        relay_name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -100,16 +109,16 @@ impl std::str::FromStr for InputSource {
 
 #[derive(Debug, Subcommand, Clone)]
 enum CmdConfVerb {
-    /// Parse a torrc file and set as default configuration
+    /// Parse a torrc file and set configuration at different scopes
     Import {
         /// Input file, `-` for stdin
         #[arg()]
         input: InputSource,
-        /// Save the parsed file as default global configuration
-        #[arg(short, long)]
-        default: bool,
+        /// Configuration scope
+        #[command(subcommand)]
+        scope: CmdVerbScope,
     },
-    /// Configure a configuration
+    /// Configure a directive
     Set {
         #[command(subcommand)]
         scope: CmdVerbScope,
@@ -220,9 +229,6 @@ async fn auth(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<im
       "#
     );
 
-    // NOTE: add time attenuation
-    // check if time($time), $time <= 2021-12-20T00:00:00Z;
-
     let token = authority
         .build(&app.biscuit_root)
         .map_err(ErrorInternalServerError)?;
@@ -233,7 +239,10 @@ async fn auth(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<im
 }
 
 #[get("/config/node")]
-async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<impl Responder> {
+async fn get_config_node(
+    app: Data<PatelaServer>,
+    req: HttpRequest,
+) -> actix_web::Result<impl Responder> {
     let node_id = node_id_from_request(&req, app.biscuit_root.public())
         .await
         .map_err(ErrorNotFound)?;
@@ -287,7 +296,7 @@ async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<
 }
 
 #[get("/config/resolved/node")]
-async fn get_config_node(
+async fn get_config_resolved_node(
     app: Data<PatelaServer>,
     req: HttpRequest,
 ) -> actix_web::Result<impl Responder> {
@@ -320,7 +329,7 @@ async fn post_specs(
 }
 
 #[get("/config/resolved/{relay_name}")]
-async fn get_resolved_config(
+async fn get_config_resolved_relay(
     app: Data<PatelaServer>,
     path: Path<String>,
     req: HttpRequest,
@@ -369,6 +378,38 @@ fn get_client_cert(connection: &dyn Any, data: &mut Extensions) {
     } else if connection.downcast_ref::<TcpStream>().is_some() {
         info!("plaintext on_connect");
     }
+}
+
+/// Helper function to filter out ORPort and Nickname directives from TorConfig
+fn filter_tor_config(
+    conf: &patela_server::tor_config::TorConfig,
+) -> patela_server::tor_config::TorConfig {
+    use std::collections::HashMap;
+
+    let mut filtered = patela_server::tor_config::TorConfig {
+        directives: HashMap::new(),
+    };
+
+    for (key, values) in &conf.directives {
+        if key.to_lowercase() != "orport" && key.to_lowercase() != "nickname" {
+            filtered.directives.insert(key.clone(), values.clone());
+        }
+    }
+
+    filtered
+}
+
+/// Helper function to get node_id and relay_id from relay name
+async fn get_relay_ids(pool: &SqlitePool, relay_name: &str) -> anyhow::Result<(i64, i64)> {
+    let nodes = get_nodes(pool).await?;
+
+    for node in nodes {
+        if let Ok(relay_id) = get_relay_by_name(pool, node.id, relay_name).await {
+            return Ok((node.id, relay_id));
+        }
+    }
+
+    anyhow::bail!("Relay '{}' not found", relay_name)
 }
 
 async fn cmd_run(
@@ -426,9 +467,9 @@ async fn cmd_run(
             .service(
                 web::scope("/private")
                     .wrap(HttpAuthentication::bearer(ok_validator))
-                    .service(relays)
-                    .service(post_specs)
-                    .service(get_resolved_config),
+                    .service(get_config_resolved_node)
+                    .service(get_config_resolved_relay)
+                    .service(post_specs),
             )
             .wrap(middleware::Logger::new("%t %s %U"))
     })
@@ -472,20 +513,49 @@ async fn main() -> anyhow::Result<()> {
 
             // Fetch all relays by node
             for node in nodes {
-                println!("Node id:\t\t{}", node.id);
-                println!("Node cert:\t\t{}", node.cert);
-                println!("First seen:\t{}", node.first_seen);
-                println!("Last seen:\t{}", node.last_seen);
+                println!(
+                    "\n{} {}",
+                    "Node".bright_magenta().bold(),
+                    node.id.to_string().cyan()
+                );
+                let cert_preview = if node.cert.len() > 16 {
+                    format!("{}...", &node.cert[..16])
+                } else {
+                    node.cert.clone()
+                };
+                println!(
+                    "  {} {}",
+                    "Certificate:".bright_black(),
+                    cert_preview.bright_black()
+                );
+                println!(
+                    "  {} {}",
+                    "First seen: ".bright_black(),
+                    node.first_seen.green()
+                );
+                println!(
+                    "  {} {}",
+                    "Last seen:  ".bright_black(),
+                    node.last_seen.green()
+                );
 
-                println!("Relays:");
-
-                for relay in get_relays_conf(&pool, node.id).await? {
-                    println!("\t{}\t\t{}\t{}", relay.name, relay.ip_v4, relay.ip_v6);
+                let relays = get_relays_conf(&pool, node.id).await?;
+                if !relays.is_empty() {
+                    println!("\n  {}:", "Relays".bright_yellow().bold());
+                    for relay in relays {
+                        println!(
+                            "    {} {} {}",
+                            relay.name.cyan().bold(),
+                            relay.ip_v4.white(),
+                            relay.ip_v6.bright_black()
+                        );
+                    }
                 }
             }
+            println!();
         }
         Commands::Conf { verb } => match verb {
-            CmdConfVerb::Import { input, default } => {
+            CmdConfVerb::Import { input, scope } => {
                 // Read input from file or stdin
                 let content = match input {
                     InputSource::Stdin => {
@@ -499,27 +569,47 @@ async fn main() -> anyhow::Result<()> {
                 // Parse torrc configuration
                 let tor_conf = TorConfigParser::parse(&content)?;
 
-                if default {
-                    // Save as global default configuration
-                    set_global_tor_conf(&pool, &tor_conf).await?;
-                    println!("Global default configuration imported successfully");
-                } else {
-                    // Just parse and display without saving
-                    println!("{}", tor_conf.to_json()?);
+                match scope {
+                    CmdVerbScope::Default => {
+                        // Filter out ORPort and Nickname for global config
+                        let filtered_conf = filter_tor_config(&tor_conf);
+                        set_global_tor_conf(&pool, &filtered_conf).await?;
+                        println!(
+                            "{} {}",
+                            "✓".green().bold(),
+                            "Global default configuration imported successfully".green()
+                        );
+                    }
+                    CmdVerbScope::Node { node_id } => {
+                        // Filter out ORPort and Nickname for node config
+                        let filtered_conf = filter_tor_config(&tor_conf);
+                        set_node_tor_conf(&pool, node_id, &filtered_conf).await?;
+                        println!(
+                            "{} Node {} configuration imported successfully",
+                            "✓".green().bold(),
+                            node_id.to_string().cyan()
+                        );
+                    }
+                    CmdVerbScope::Relay { relay_name } => {
+                        // No filtering for relay config
+                        let (_node_id, relay_id) = get_relay_ids(&pool, &relay_name).await?;
+                        set_relay_tor_conf(&pool, relay_id, &tor_conf).await?;
+                        println!(
+                            "{} Relay '{}' (id:{}) configuration imported successfully",
+                            "✓".green().bold(),
+                            relay_name.cyan(),
+                            relay_id.to_string().yellow()
+                        );
+                    }
                 }
             }
             CmdConfVerb::Get { scope, json } => {
                 let conf = match scope {
                     CmdVerbScope::Default => get_global_tor_conf(&pool).await?,
-                    CmdVerbScope::Node => {
-                        anyhow::bail!(
-                            "Node scope requires --node-id parameter (not yet implemented)"
-                        );
-                    }
-                    CmdVerbScope::Relay => {
-                        anyhow::bail!(
-                            "Relay scope requires --relay-id parameter (not yet implemented)"
-                        );
+                    CmdVerbScope::Node { node_id } => get_node_tor_conf(&pool, node_id).await?,
+                    CmdVerbScope::Relay { relay_name } => {
+                        let (_, relay_id) = get_relay_ids(&pool, &relay_name).await?;
+                        get_relay_tor_conf(&pool, relay_id).await?
                     }
                 };
 
@@ -531,12 +621,16 @@ async fn main() -> anyhow::Result<()> {
                             // Pretty print as torrc format
                             for (key, values) in &c.directives {
                                 for value in values {
-                                    println!("{} {}", key, value);
+                                    println!(
+                                        "{} {}",
+                                        key.bright_blue().bold(),
+                                        value.to_string().white()
+                                    );
                                 }
                             }
                         }
                     }
-                    None => println!("No configuration found"),
+                    None => println!("{} {}", "ℹ".blue(), "No configuration found".yellow()),
                 }
             }
             CmdConfVerb::Set {
