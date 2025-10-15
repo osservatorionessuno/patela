@@ -33,7 +33,7 @@ use rtnetlink::{
 use std::{
     collections::BTreeMap,
     ffi::CStr,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::Path,
 };
 use sysinfo::{Networks, System};
@@ -196,6 +196,54 @@ pub async fn add_default_route_v6(
     handle.route().add(route).execute().await?;
 
     Ok(())
+}
+
+/// Get all network link
+pub async fn dump_links(handle: &rtnetlink::Handle) -> anyhow::Result<Vec<(u32, String)>> {
+    let mut links = handle
+        .link()
+        .get()
+        .set_filter_mask(AddressFamily::Inet, vec![LinkExtentMask::Brvlan])
+        .execute();
+
+    let mut dump: Vec<(u32, String)> = Vec::new();
+
+    'outer: while let Some(msg) = links.try_next().await? {
+        for nla in msg.attributes.into_iter() {
+            if let LinkAttribute::IfName(name) = nla {
+                println!("found link {} ({})", msg.header.index, name);
+                dump.push((msg.header.index, name));
+                continue 'outer;
+            }
+        }
+        eprintln!("found link {}, but the link has no name", msg.header.index);
+    }
+
+    Ok(dump)
+}
+
+/// Get all network addresses for a link
+pub async fn dump_addresses(
+    handle: &rtnetlink::Handle,
+    link_index: u32,
+) -> anyhow::Result<Vec<IpAddr>> {
+    let mut address_stream = handle
+        .address()
+        .get()
+        .set_link_index_filter(link_index)
+        .execute();
+
+    let mut addresses: Vec<IpAddr> = Vec::new();
+
+    while let Some(msg) = address_stream.try_next().await? {
+        for nla in msg.attributes.iter() {
+            if let AddressAttribute::Address(addr) = nla {
+                addresses.push(*addr);
+            }
+        }
+    }
+
+    Ok(addresses)
 }
 
 pub async fn add_network_address(
