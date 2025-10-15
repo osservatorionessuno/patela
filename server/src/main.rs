@@ -5,14 +5,17 @@ use actix_web::{
     error::{ErrorNotFound, ErrorUnauthorized},
     get, middleware, post,
     rt::net::TcpStream,
-    web::{self, Bytes, Data, Json, Path},
+    web::{self, Data, Json, Path},
 };
+
+use std::io::Read;
+
 use actix_web_httpauth::{extractors::bearer::BearerAuth, middleware::HttpAuthentication};
 use biscuit_auth::{Biscuit, PrivateKey, PublicKey, macros::biscuit};
 use clap::{Args, Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 use log::info;
-use patela_server::{api::*, db::*, *};
+use patela_server::{api::*, db::*, tor_config::TorConfigParser, *};
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -330,43 +333,43 @@ async fn relays(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<
     }))
 }
 
-#[get("/relays/data/{name}")]
-async fn get_relay_data(
+#[post("/specs")]
+async fn post_specs(
     app: Data<PatelaServer>,
-    path: Path<String>,
     req: HttpRequest,
+    body: Json<HwSpecs>,
 ) -> actix_web::Result<impl Responder> {
     let node_id = node_id_from_request(&req, app.biscuit_root.public())
         .await
         .map_err(ErrorNotFound)?;
 
-    let data = get_data(&app.db, node_id, &path.into_inner())
+    let spec_id = create_node_spec(&app.db, node_id, &body.into_inner())
         .await
-        .map_err(ErrorNotFound)?;
+        .map_err(ErrorInternalServerError)?;
 
-    Ok(HttpResponse::Ok().body(data))
+    Ok(Json(serde_json::json!({ "id": spec_id })))
 }
 
-#[post("/relays/data/{name}")]
-async fn post_relay_data(
+#[get("/config/resolved/{relay_name}")]
+async fn get_resolved_config(
     app: Data<PatelaServer>,
     path: Path<String>,
     req: HttpRequest,
-    body: Bytes,
 ) -> actix_web::Result<impl Responder> {
     let node_id = node_id_from_request(&req, app.biscuit_root.public())
         .await
         .map_err(ErrorNotFound)?;
 
-    let relay_id = get_relay_by_name(&app.db, node_id, &path.into_inner())
+    let relay_name = path.into_inner();
+    let relay_id = get_relay_by_name(&app.db, node_id, &relay_name)
+        .await
+        .map_err(ErrorNotFound)?;
+
+    let resolved_conf = get_resolved_relay_conf(&app.db, node_id, relay_id)
         .await
         .map_err(ErrorInternalServerError)?;
 
-    let _ = insert_data(&app.db, relay_id, body.to_vec())
-        .await
-        .map_err(ErrorInternalServerError)?;
-
-    Ok(HttpResponse::Ok())
+    Ok(Json(resolved_conf))
 }
 
 async fn ok_validator(
@@ -454,7 +457,9 @@ async fn cmd_run(
             .service(
                 web::scope("/private")
                     .wrap(HttpAuthentication::bearer(ok_validator))
-                    .service(relays),
+                    .service(relays)
+                    .service(post_specs)
+                    .service(get_resolved_config),
             )
             .wrap(middleware::Logger::new("%t %s %U"))
     })
@@ -512,20 +517,74 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Conf { verb } => match verb {
             CmdConfVerb::Import { input, default } => {
-                // TODO: open file or stdin
-                // TODO: parse torrc
+                // Read input from file or stdin
+                let content = match input {
+                    InputSource::Stdin => {
+                        let mut buffer = String::new();
+                        std::io::stdin().read_to_string(&mut buffer)?;
+                        buffer
+                    }
+                    InputSource::File(path) => std::fs::read_to_string(path)?,
+                };
+
+                // Parse torrc configuration
+                let tor_conf = TorConfigParser::parse(&content)?;
+
+                if default {
+                    // Save as global default configuration
+                    set_global_tor_conf(&pool, &tor_conf).await?;
+                    println!("Global default configuration imported successfully");
+                } else {
+                    // Just parse and display without saving
+                    println!("{}", tor_conf.to_json()?);
+                }
             }
             CmdConfVerb::Get { scope, json } => {
-                // TODO: filter by scope
-                // TODO: get from db
-                // TODO: pretty print or json
+                let conf = match scope {
+                    CmdVerbScope::Default => get_global_tor_conf(&pool).await?,
+                    CmdVerbScope::Node => {
+                        anyhow::bail!(
+                            "Node scope requires --node-id parameter (not yet implemented)"
+                        );
+                    }
+                    CmdVerbScope::Relay => {
+                        anyhow::bail!(
+                            "Relay scope requires --relay-id parameter (not yet implemented)"
+                        );
+                    }
+                };
+
+                match conf {
+                    Some(c) => {
+                        if json {
+                            println!("{}", c.to_json()?);
+                        } else {
+                            // Pretty print as torrc format
+                            for (key, values) in &c.directives {
+                                for value in values {
+                                    println!("{} {}", key, value);
+                                }
+                            }
+                        }
+                    }
+                    None => println!("No configuration found"),
+                }
             }
             CmdConfVerb::Set {
-                scope,
-                directive,
-                value,
-            } => !unimplemented!(),
-            CmdConfVerb::Remove { scope, directive } => !unimplemented!(),
+                scope: _,
+                directive: _,
+                value: _,
+            } => {
+                anyhow::bail!(
+                    "Set command not yet implemented. Use 'import' to set configurations from torrc files"
+                );
+            }
+            CmdConfVerb::Remove {
+                scope: _,
+                directive: _,
+            } => {
+                anyhow::bail!("Remove command not yet implemented");
+            }
         },
     }
     Ok(())
