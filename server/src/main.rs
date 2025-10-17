@@ -118,7 +118,7 @@ enum CmdConfVerb {
         #[command(subcommand)]
         scope: CmdVerbScope,
     },
-    /// Configure a directive
+    /// Configure a configuration
     Set {
         #[command(subcommand)]
         scope: CmdVerbScope,

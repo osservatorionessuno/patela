@@ -58,7 +58,7 @@ struct Config {
     #[command(subcommand)]
     cmd: Option<Commands>,
     /// bind local ip
-    #[arg(long, default_value = PATELA_SERVER )]
+    #[arg(long, env = "PATELA_SERVER")]
     server: String,
     /// tpm device, use `TCTI` env variable for swtpm
     #[arg(long)]
@@ -233,19 +233,31 @@ async fn cmd_start(
             let relay_ipv6: Ipv6Addr = relay.or_address_v6.parse()?;
 
             if !addresses.contains(&IpAddr::V4(relay_ipv4)) {
-                println!("Adding IPv4 address {} for relay {}", relay_ipv4, relay.name);
+                println!(
+                    "Adding IPv4 address {} for relay {}",
+                    relay_ipv4, relay.name
+                );
                 let ipv4_network = IpNetwork::new(IpAddr::V4(relay_ipv4), 24)?;
                 add_network_address(interface_index, ipv4_network, &net_handle).await?;
             } else {
-                println!("IPv4 address {} already configured for relay {}", relay_ipv4, relay.name);
+                println!(
+                    "IPv4 address {} already configured for relay {}",
+                    relay_ipv4, relay.name
+                );
             }
 
             if !addresses.contains(&IpAddr::V6(relay_ipv6)) {
-                println!("Adding IPv6 address {} for relay {}", relay_ipv6, relay.name);
+                println!(
+                    "Adding IPv6 address {} for relay {}",
+                    relay_ipv6, relay.name
+                );
                 let ipv6_network = IpNetwork::new(IpAddr::V6(relay_ipv6), 48)?;
                 add_network_address(interface_index, ipv6_network, &net_handle).await?;
             } else {
-                println!("IPv6 address {} already configured for relay {}", relay_ipv6, relay.name);
+                println!(
+                    "IPv6 address {} already configured for relay {}",
+                    relay_ipv6, relay.name
+                );
             }
         }
 
