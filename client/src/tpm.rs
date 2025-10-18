@@ -1,14 +1,17 @@
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, KeyInit};
+use tss_esapi::attributes::NvIndexAttributesBuilder;
 use tss_esapi::constants::{CapabilityType, tss::TPM2_PERSISTENT_FIRST};
-use tss_esapi::handles::{ObjectHandle, PersistentTpmHandle, TpmHandle};
+use tss_esapi::handles::{
+    NvIndexHandle, NvIndexTpmHandle, ObjectHandle, PersistentTpmHandle, TpmHandle,
+};
 use tss_esapi::interface_types::dynamic_handles::Persistent;
 use tss_esapi::interface_types::key_bits::RsaKeyBits;
-use tss_esapi::interface_types::resource_handles::Provision;
+use tss_esapi::interface_types::resource_handles::{NvAuth, Provision};
 use tss_esapi::interface_types::session_handles::AuthSession;
 use tss_esapi::structures::{
-    CapabilityData, CreatePrimaryKeyResult, Data, HashScheme, PublicKeyRsa, RsaDecryptionScheme,
-    RsaExponent,
+    Auth, CapabilityData, CreatePrimaryKeyResult, Data, HashScheme, MaxNvBuffer, NvPublicBuilder,
+    PublicKeyRsa, RsaDecryptionScheme, RsaExponent,
 };
 use tss_esapi::tss2_esys::TPM2_HANDLE;
 use tss_esapi::utils::create_unrestricted_encryption_decryption_rsa_public;
@@ -208,4 +211,89 @@ pub fn test_aes_gcm(context: &mut Context) {
         .unwrap();
 
     println!("Original message: {}", from_utf8(&original_msg).unwrap());
+}
+
+// TODO: choose wisely
+const NV_INDEX: u32 = 0x0140_0000; // Middle of owner range
+pub const NV_SIZE: usize = 40 * 12;
+
+pub fn get_nv_index_handle(ctx: &mut Context) -> anyhow::Result<NvIndexHandle> {
+    let nv_index_tpm_handle = NvIndexTpmHandle::new(NV_INDEX)?;
+
+    // Check if it exists by trying to query capabilities
+    let mut property = 0x01000000u32; // Start of NV index range
+    let mut exists = false;
+
+    while let Ok((capability_data, more)) =
+        ctx.get_capability(CapabilityType::Handles, property, 100)
+    {
+        if let CapabilityData::Handles(handles) = capability_data {
+            if handles.iter().any(|&h| TPM2_HANDLE::from(h) == NV_INDEX) {
+                exists = true;
+                break;
+            }
+            if let Some(&last) = handles.last() {
+                property = TPM2_HANDLE::from(last) + 1;
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+
+    if exists {
+        // Index exists, get proper handle
+        let handle = ctx.tr_from_tpm_public(TpmHandle::NvIndex(nv_index_tpm_handle))?;
+        Ok(handle.try_into()?)
+    } else {
+        // Create new index
+        let attrs = NvIndexAttributesBuilder::new()
+            .with_owner_read(true)
+            .with_owner_write(true)
+            .build()?;
+
+        let nv_public = NvPublicBuilder::new()
+            .with_nv_index(nv_index_tpm_handle)
+            .with_index_name_algorithm(HashingAlgorithm::Sha256)
+            .with_index_attributes(attrs)
+            .with_data_area_size(NV_SIZE)
+            .build()?;
+
+        ctx.execute_with_session(Some(AuthSession::Password), |ctx| {
+            ctx.nv_define_space(Provision::Owner, None, nv_public)
+        })?;
+
+        // Get proper handle after creation
+        let handle = ctx.tr_from_tpm_public(TpmHandle::NvIndex(nv_index_tpm_handle))?;
+        Ok(handle.try_into()?)
+    }
+}
+
+pub fn nv_write_key(
+    ctx: &mut Context,
+    nv_handle: NvIndexHandle,
+    key: &[u8; NV_SIZE],
+) -> anyhow::Result<()> {
+    let buffer = MaxNvBuffer::try_from(key.as_ref())?;
+
+    ctx.execute_with_session(Some(AuthSession::Password), |ctx| {
+        ctx.nv_write(NvAuth::Owner, nv_handle, buffer, 0)
+    })?;
+
+    Ok(())
+}
+
+pub fn nv_read_key(ctx: &mut Context, nv_handle: NvIndexHandle) -> anyhow::Result<[u8; NV_SIZE]> {
+    let data = ctx.execute_with_session(Some(AuthSession::Password), |ctx| {
+        ctx.nv_read(NvAuth::Owner, nv_handle, NV_SIZE as u16, 0)
+    })?;
+
+    let buf = data.value();
+    let vec = buf.to_vec();
+    if vec.len() != NV_SIZE {
+        anyhow::bail!("expected {} bytes got {}", NV_SIZE, vec.len())
+    }
+    let mut out = [0u8; NV_SIZE];
+    out.copy_from_slice(&vec);
+    Ok(out)
 }
