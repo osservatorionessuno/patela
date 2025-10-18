@@ -45,6 +45,8 @@ enum TpmCommands {
     CreatePrimary,
     Encrypt,
     Decrypt,
+    NvRead,
+    NvWrite,
     Test,
     Attestate,
 }
@@ -428,6 +430,20 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
                 "=== Decrypted data ===\n\n{}",
                 std::str::from_utf8(&plain_text)?
             );
+        }
+        TpmCommands::NvWrite => {
+            let plain_text = "A".repeat(NV_SIZE);
+            let array_ref: &[u8; 480] = plain_text.as_bytes().try_into().unwrap();
+            let nv_index_handle = get_nv_index_handle(context).unwrap();
+            nv_write_key(context, nv_index_handle, array_ref).unwrap();
+
+            println!("=== Data successfully written to TPM NV ===");
+        }
+        TpmCommands::NvRead => {
+            let nv_index_handle = get_nv_index_handle(context).unwrap();
+            let bytes = nv_read_key(context, nv_index_handle).unwrap();
+            let text = std::str::from_utf8(&bytes).unwrap();
+            println!("=== {} read from TPM NV ===", text);
         }
         TpmCommands::Test => {
             test_aes_gcm(context)?;
