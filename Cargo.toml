@@ -6,3 +6,10 @@ members = [
 ]
 
 resolver = "2"
+
+[patch.crates-io]
+# Force all dependencies to use the git version of elliptic curves
+# This is needed because tss-esapi uses git versions
+primefield = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
+p256 = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
+concat-kdf = { git = "https://github.com/RustCrypto/KDFs.git" }

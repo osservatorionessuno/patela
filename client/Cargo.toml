@@ -4,31 +4,35 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-patela-server = { path = "../server" }
+actix-tls = "3.4.0"
+aes = "0.9.0-rc.1"
+aes-gcm = "0.10.3"
 anyhow = "1.0.100"
-clap = { version = "4.5.48", features = ["derive"] }
+clap = { version = "4.5.49", features = ["derive"] }
+elliptic-curve = { version = "0.14.0-rc.15", features = ["alloc", "pkcs8", "arithmetic", "serde"] }
+etc-passwd = "0.2.2"
 flate2 = "1.1.4"
+futures = "0.3.31"
+ipnetwork = "0.21"
 lazy_static = "1.5.0"
-reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+mnl = "0.2.2"
+netlink-packet-core = "0.8"
+netlink-packet-route = "0.25"
+netlink-proto = "0.12"
+nftnl = "0.7.0"
+p256 = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
+patela-server = { path = "../server" }
+primefield = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+rtnetlink = "0.18"
+rustls-pemfile = "2.2.0"
+sha2 = { version = "0.11.0-rc.2", features = ["oid"] }
 sysinfo = { version = "0.37", features = ["serde"] }
 systemctl = "0.5.0"
-tera = "1.20.0"
-tokio = { version = "1.47", features = ["full"] }
-tss-esapi = "7.6.0"
-rtnetlink = "0.18"
-nftnl = "0.7.0"
-futures = "0.3.31"
-netlink-packet-route = "0.25"
-netlink-packet-core = "0.8"
-netlink-proto = "0.12"
-ipnetwork = "0.21"
-etc-passwd = "0.2.2"
-actix-tls = "3.4.0"
-rustls-pemfile = "2.2.0"
 tar = "0.4.44"
-aes-gcm = "0.10.3"
-mnl = "0.2.2"
-
+tera = "1.20.0"
+tokio = { version = "1.48", features = ["full"] }
+tss-esapi = { git = "https://github.com/baloo/rust-tss-esapi", branch = "baloo/make-credentials", features = ["rustcrypto", "integration-tests", "serde", "abstraction", "p256"] }
 [build-dependencies]
 const-gen = "1.6.8"
 

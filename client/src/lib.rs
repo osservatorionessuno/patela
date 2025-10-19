@@ -452,7 +452,7 @@ pub async fn generate_aes_cipher_and_store(
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
     // encrypt the aes key with tpm
-    let ciphered_key = tpm::encrypt(tpm_ctx, key.to_vec());
+    let ciphered_key = tpm::encrypt(tpm_ctx, key.to_vec())?;
 
     let _ = client
         .post(format!("{}/private/node/key", server_url))
@@ -505,7 +505,7 @@ pub async fn fetch_aes_key(
         .into();
 
     // decrypt aes key with tpm
-    let key = tpm::decrypt(tpm_ctx, ciphered_key.into());
+    let key = tpm::decrypt(tpm_ctx, ciphered_key.into())?;
 
     let cipher = Aes256Gcm::new(key.as_slice().into());
 
@@ -523,11 +523,16 @@ mod tests {
     const TORRC_EXAMPLE: &'static str = "
 Nickname miaomiao
 
+AvoidDiskWrites 1
+DisableAllSwap 1
+
 ORPort 0.0.0.0:9001
 ORPort [0.0.0.0]:9001
 
 RelayBandwidthRate 10 MB
 RelayBandwidthBurst 100 MB
+
+MaxMemInQueues 400 MB
 
 ContactInfo email:info[]osservatorionessuno.org url:https://osservatorionessuno.org proof:uri-rsa abuse:exit[]osservatorionessuno.org mastodon:https://mastodon.cisti.org/@0n_odv donationurl:https://osservatorionessuno.org/participate/ ciissversion:2
 
