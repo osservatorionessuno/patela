@@ -6,6 +6,7 @@ use std::{
 
 pub mod db;
 pub mod tor_config;
+pub mod tpm;
 
 const RELAY_MEMORY_BOUND: u64 = 1024; // TODO: configurable
 pub const RELAY_OR_PORT: u16 = 9001;

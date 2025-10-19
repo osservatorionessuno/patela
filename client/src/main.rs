@@ -31,11 +31,15 @@ enum TpmCommands {
     Encrypt,
     Decrypt,
     Test,
+    Attestate,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
     Start {
+        #[arg(long, env = "PATELA_SERVER")]
+        server: String,
+        // TODO: use action also in new server cli
         #[arg(long, action, help = "Do not run network setup")]
         skip_net: bool,
         #[arg(long, action, help = "Do not try to restore long term keys")]
@@ -56,10 +60,7 @@ enum Commands {
 #[derive(Debug, Clone, Parser)]
 struct Config {
     #[command(subcommand)]
-    cmd: Option<Commands>,
-    /// bind local ip
-    #[arg(long, env = "PATELA_SERVER")]
-    server: String,
+    cmd: Commands,
     /// tpm device, use `TCTI` env variable for swtpm
     #[arg(long)]
     tpm2: Option<String>,
@@ -71,14 +72,12 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Starting patela...");
 
-    match config.cmd.unwrap_or(Commands::Start {
-        skip_net: false,
-        skip_restore: false,
-    }) {
+    match config.cmd {
         Commands::Start {
+            server,
             skip_net,
             skip_restore,
-        } => cmd_start(config.server, config.tpm2, skip_net, skip_restore).await,
+        } => cmd_start(server, config.tpm2, skip_net, skip_restore).await,
         Commands::Tpm { cmd } => cmd_tpm(cmd, config.tpm2).await,
         Commands::Net { cmd } => cmd_net(cmd).await,
     }
@@ -101,9 +100,9 @@ async fn cmd_start(
     // If the key are found in the tpm assume is not the first run
     // In other case create and get the id
     let (_primary_key, is_first_run): (KeyHandle, bool) =
-        match find_persistent_handle(context, get_persistent_handler()) {
+        match find_persistent_handle(context, get_persistent_handler()?)? {
             Some(object) => (object.into(), false),
-            None => (create_and_persist(context), true),
+            None => (create_and_persist(context)?, true),
         };
 
     match is_first_run {
@@ -323,27 +322,39 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
     match config {
         TpmCommands::ListPersistent => {}
         TpmCommands::CleanPersistent => {
-            remove_persitent_handle(context, get_persistent_handler());
+            remove_persitent_handle(context, get_persistent_handler()?)?;
         }
         TpmCommands::CreatePrimary => {
-            create_and_persist(context);
+            create_and_persist(context)?;
         }
         TpmCommands::Encrypt => {
             let plain_text = "miao miao";
-            let cypher_text = encrypt(context, plain_text.as_bytes().to_vec());
+            let cypher_text = encrypt(context, plain_text.as_bytes().to_vec())?;
             let _ = fs::write("encrypted.txt", cypher_text);
         }
         TpmCommands::Decrypt => {
-            let input = fs::read("encrypted.txt").unwrap();
-            let plain_text = decrypt(context, input);
+            let input = fs::read("encrypted.txt")?;
+            let plain_text = decrypt(context, input)?;
 
             println!(
                 "=== Decrypted data ===\n\n{}",
-                std::str::from_utf8(&plain_text).unwrap()
+                std::str::from_utf8(&plain_text)?
             );
         }
         TpmCommands::Test => {
-            test_aes_gcm(context);
+            test_aes_gcm(context)?;
+        }
+        TpmCommands::Attestate => {
+            let (ek_ecc, ek_public, ak_ecc, ak_public) = load_attestation_keys(context)?;
+
+            // Get the AK name
+            let (_ak_pub, ak_name, _qualified_name) = context.read_public(ak_ecc)?;
+
+            // create the attestation challange with real tpm (can be done without TPM context)
+            let challenge = b"test challenge data";
+            let (blob, secret) =
+                patela_server::tpm::create_attestation_credentials(ek_public, ak_name, challenge)?;
+            let _result = resolve_attestation_challenge(context, ek_ecc, ak_ecc, blob, secret)?;
         }
     }
 
