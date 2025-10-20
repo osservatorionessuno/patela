@@ -157,6 +157,16 @@ enum Commands {
         #[command(subcommand)]
         verb: CmdConfVerb,
     },
+    /// Enable a node (allow authentication and relay creation)
+    Enable {
+        /// Node ID to enable
+        node_id: i64,
+    },
+    /// Disable a node (block authentication)
+    Disable {
+        /// Node ID to disable
+        node_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -227,6 +237,13 @@ async fn auth(
     let node = get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex)
         .await
         .map_err(ErrorInternalServerError)?;
+
+    // Check if node is enabled (manual approval required)
+    if !node.enabled {
+        return Err(ErrorUnauthorized(
+            "Node is not yet enabled. Call the hotline.",
+        ));
+    }
 
     // Create a biscuit token that will be the session token
     let node_id = node.id;
@@ -578,6 +595,17 @@ async fn main() -> anyhow::Result<()> {
                     node.last_seen.green()
                 );
 
+                let status_text = if node.enabled {
+                    "enabled".green().bold()
+                } else {
+                    "disabled".red().bold()
+                };
+                println!(
+                    "  {} {}",
+                    "Status:     ".bright_black(),
+                    status_text
+                );
+
                 let relays = get_relays_conf(&pool, node.id).await?;
                 if !relays.is_empty() {
                     println!("\n  {}:", "Relays".bright_yellow().bold());
@@ -688,6 +716,24 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Remove command not yet implemented");
             }
         },
+        Commands::Enable { node_id } => {
+            enable_node(&pool, node_id).await?;
+            println!(
+                "{} Node {} {}",
+                "✓".green().bold(),
+                node_id.to_string().cyan(),
+                "enabled successfully".green()
+            );
+        }
+        Commands::Disable { node_id } => {
+            disable_node(&pool, node_id).await?;
+            println!(
+                "{} Node {} {}",
+                "✓".green().bold(),
+                node_id.to_string().cyan(),
+                "disabled successfully".yellow()
+            );
+        }
     }
     Ok(())
 }
