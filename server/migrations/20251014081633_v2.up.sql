@@ -46,29 +46,17 @@ CREATE TABLE nodes_new (
     first_seen  TEXT                NOT NULL,           -- ISO 8601 timestamp
     last_seen   TEXT                NOT NULL,           -- ISO 8601 timestamp
     active      INTEGER             NOT NULL DEFAULT 1, -- Boolean: 1=active, 0=inactive
+    enabled     INTEGER             NOT NULL DEFAULT 0, -- Boolean: 1=enabled, 0=disabled (manual approval)
     ek_public   TEXT                NOT NULL UNIQUE,    -- TPM Endorsement Key (hex-encoded)
     ak_public   TEXT                NOT NULL,           -- TPM Attestation Key (hex-encoded)
     tor_conf    TEXT,                                   -- Node-specific tor config overrides
     node_conf   TEXT                                    -- Node-specific config
 );
 
--- Migrate existing nodes (only those with valid TPM keys)
--- This will drop any nodes without TPM keys (legacy certificate-only nodes)
-INSERT INTO nodes_new (id, first_seen, last_seen, active, ek_public, ak_public, tor_conf, node_conf)
-SELECT
-    id,
-    first_seen,
-    last_seen,
-    active,
-    ek_public,
-    ak_public,
-    NULL,  -- tor_conf (new column)
-    NULL   -- node_conf (new column)
-FROM nodes
-WHERE ek_public IS NOT NULL
-  AND ek_public != ''
-  AND ak_public IS NOT NULL
-  AND ak_public != '';
+-- Note: V1 schema uses cert-based auth without TPM keys
+-- V2 requires TPM attestation, so we cannot migrate existing nodes
+-- All existing nodes will be dropped and must re-register with TPM attestation
+-- The migration intentionally leaves nodes_new empty
 
 -- Replace old table with new schema
 DROP TABLE nodes;

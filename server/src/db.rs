@@ -48,6 +48,7 @@ pub struct NodeRecord {
     pub id: i64,
     pub first_seen: String,
     pub last_seen: String,
+    pub enabled: bool,
     pub ek_public: String,
     pub ak_public: String,
 }
@@ -97,7 +98,7 @@ pub async fn get_nodes(pool: &SqlitePool) -> anyhow::Result<Vec<NodeRecord>> {
     let res = sqlx::query_as!(
         NodeRecord,
         r#"
-SELECT id, first_seen, last_seen, ek_public, ak_public FROM nodes
+SELECT id, first_seen, last_seen, enabled as "enabled: bool", ek_public, ak_public FROM nodes
         "#,
     )
     .fetch_all(&mut *conn)
@@ -117,7 +118,7 @@ pub async fn get_or_create_node_by_ek(
     let existing = sqlx::query_as!(
         NodeRecord,
         r#"
-SELECT id, first_seen, last_seen, ek_public, ak_public
+SELECT id, first_seen, last_seen, enabled as "enabled: bool", ek_public, ak_public
 FROM nodes
 WHERE ek_public = ?1
         "#,
@@ -167,6 +168,7 @@ VALUES (?1, ?2, ?3, ?4)
             id,
             first_seen: now.clone(),
             last_seen: now,
+            enabled: false,  // New nodes default to disabled, require manual approval
             ek_public: ek_public.to_string(),
             ak_public: ak_public.to_string(),
         })
@@ -188,6 +190,40 @@ WHERE id = ?
     .last_insert_rowid();
 
     Ok(id)
+}
+
+pub async fn enable_node(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
+    let mut conn = pool.acquire().await?;
+
+    sqlx::query!(
+        r#"
+UPDATE nodes
+SET enabled = 1
+WHERE id = ?
+        "#,
+        id,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn disable_node(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
+    let mut conn = pool.acquire().await?;
+
+    sqlx::query!(
+        r#"
+UPDATE nodes
+SET enabled = 0
+WHERE id = ?
+        "#,
+        id,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
 }
 
 pub async fn create_relay(
@@ -699,7 +735,7 @@ mod tests {
 
     #[sqlx::test]
     async fn test_create_node(pool: SqlitePool) -> sqlx::Result<()> {
-        let _ = create_node(&pool, "prova").await;
+        let _ = create_node(&pool, "ek_hex_test", "ak_hex_test").await;
 
         Ok(())
     }
@@ -737,7 +773,7 @@ DataDirectory /var/lib/tor
         );
 
         // Create a node
-        let node_id = create_node(&pool, "test_cert_digest").await.unwrap();
+        let node_id = create_node(&pool, "test_ek_hex", "test_ak_hex").await.unwrap();
 
         // Set node-specific override
         let node_torrc = r#"
@@ -788,51 +824,63 @@ ControlPort 9999
     #[sqlx::test]
     async fn test_get_nodes(pool: SqlitePool) -> sqlx::Result<()> {
         // Create multiple nodes
-        let _ = create_node(&pool, "cert1").await.unwrap();
-        let _ = create_node(&pool, "cert2").await.unwrap();
-        let _ = create_node(&pool, "cert3").await.unwrap();
+        let _ = create_node(&pool, "ek1", "ak1").await.unwrap();
+        let _ = create_node(&pool, "ek2", "ak2").await.unwrap();
+        let _ = create_node(&pool, "ek3", "ak3").await.unwrap();
 
         let nodes = get_nodes(&pool).await.unwrap();
         assert_eq!(nodes.len(), 3);
-        assert_eq!(nodes[0].cert, "cert1");
-        assert_eq!(nodes[1].cert, "cert2");
-        assert_eq!(nodes[2].cert, "cert3");
+        assert_eq!(nodes[0].ek_public, "ek1");
+        assert_eq!(nodes[1].ek_public, "ek2");
+        assert_eq!(nodes[2].ek_public, "ek3");
 
         Ok(())
     }
 
     #[sqlx::test]
-    async fn test_get_node_by_cert(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "unique_cert").await.unwrap();
+    async fn test_get_or_create_node_by_ek(pool: SqlitePool) -> sqlx::Result<()> {
+        let ek = "unique_ek_hex";
+        let ak = "unique_ak_hex";
 
-        let node = get_node_by_cert(&pool, "unique_cert").await.unwrap();
-        assert_eq!(node.id, node_id);
-        assert_eq!(node.cert, "unique_cert");
+        // First call creates the node
+        let node1 = get_or_create_node_by_ek(&pool, ek, ak).await.unwrap();
+        assert_eq!(node1.ek_public, ek);
+        assert_eq!(node1.ak_public, ak);
+        assert_eq!(node1.enabled, false);  // Should default to disabled
+
+        // Second call returns the existing node
+        let node2 = get_or_create_node_by_ek(&pool, ek, "new_ak_hex").await.unwrap();
+        assert_eq!(node2.id, node1.id);
+        assert_eq!(node2.ek_public, ek);
+        assert_eq!(node2.ak_public, "new_ak_hex");  // AK should be updated
 
         Ok(())
     }
 
     #[sqlx::test]
     async fn test_remove_node(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "to_delete").await.unwrap();
+        let ek = "to_delete_ek";
+        let ak = "to_delete_ak";
+
+        let node = get_or_create_node_by_ek(&pool, ek, ak).await.unwrap();
 
         // Node exists
-        let node = get_node_by_cert(&pool, "to_delete").await;
-        assert!(node.is_ok());
+        let found = get_or_create_node_by_ek(&pool, ek, ak).await;
+        assert!(found.is_ok());
 
         // Remove the node
-        remove_node(&pool, node_id).await.unwrap();
+        remove_node(&pool, node.id).await.unwrap();
 
-        // Node should not exist anymore
-        let node = get_node_by_cert(&pool, "to_delete").await;
-        assert!(node.is_err());
+        // Node should be gone from the database
+        let nodes = get_nodes(&pool).await.unwrap();
+        assert!(nodes.iter().all(|n| n.id != node.id));
 
         Ok(())
     }
 
     #[sqlx::test]
     async fn test_find_ips_incremental(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "test_node").await.unwrap();
+        let node_id = create_node(&pool, "test_ek", "test_ak").await.unwrap();
 
         // Get first IPs
         let (ipv4_1, ipv6_1) = find_next_ips(&pool).await.unwrap();
@@ -871,7 +919,7 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_create_and_get_relay(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "relay_node").await.unwrap();
+        let node_id = create_node(&pool, "relay_ek", "relay_ak").await.unwrap();
         let (cheese_id, cheese_name) = allocate_cheese(&pool).await.unwrap();
 
         let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1")
@@ -890,7 +938,7 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_get_relays_conf(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "multi_relay_node").await.unwrap();
+        let node_id = create_node(&pool, "multi_relay_ek", "multi_relay_ak").await.unwrap();
 
         // Create multiple relays for this node
         let (cheese_id_1, _) = allocate_cheese(&pool).await.unwrap();
@@ -913,7 +961,7 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_node_specs(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "spec_node").await.unwrap();
+        let node_id = create_node(&pool, "spec_ek", "spec_ak").await.unwrap();
 
         let specs = HwSpecs {
             memory: 16_000_000_000,
@@ -962,7 +1010,7 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_node_node_conf(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "conf_node").await.unwrap();
+        let node_id = create_node(&pool, "conf_ek", "conf_ak").await.unwrap();
 
         let conf = NodeConfig {
             network: NetworkConf {
@@ -1014,7 +1062,7 @@ DataDirectory /var/lib/tor
 
     #[sqlx::test]
     async fn test_node_tor_conf(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "tor_conf_node").await.unwrap();
+        let node_id = create_node(&pool, "tor_conf_ek", "tor_conf_ak").await.unwrap();
 
         let torrc = r#"
 SocksPort 9150
@@ -1037,7 +1085,7 @@ SocksPort 9150
 
     #[sqlx::test]
     async fn test_relay_tor_conf(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "relay_conf_node").await.unwrap();
+        let node_id = create_node(&pool, "relay_conf_ek", "relay_conf_ak").await.unwrap();
         let (cheese_id, _) = allocate_cheese(&pool).await.unwrap();
         let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1")
             .await
@@ -1079,7 +1127,7 @@ ControlPort 9999
         set_global_node_conf(&pool, &global_conf).await.unwrap();
 
         // Create a node without specific config
-        let node_id = create_node(&pool, "fallback_node").await.unwrap();
+        let node_id = create_node(&pool, "fallback_ek", "fallback_ak").await.unwrap();
 
         // Should fall back to global config
         let resolved = get_resolved_node_conf(&pool, node_id).await.unwrap();
@@ -1106,7 +1154,7 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_resolved_node_conf_no_config(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "no_conf_node").await.unwrap();
+        let node_id = create_node(&pool, "no_conf_ek", "no_conf_ak").await.unwrap();
 
         // Should fail since there's no global or node-specific config
         let result = get_resolved_node_conf(&pool, node_id).await;
@@ -1140,7 +1188,7 @@ IPv6Exit 1
         set_global_tor_conf(&pool, &global_conf).await.unwrap();
 
         // Create a node with node-specific override (disable AvoidDiskWrites)
-        let node_id = create_node(&pool, "test_node").await.unwrap();
+        let node_id = create_node(&pool, "test_ek", "test_ak").await.unwrap();
         let node_torrc = r#"
 AvoidDiskWrites 0
         "#;

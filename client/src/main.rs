@@ -25,6 +25,9 @@ use tss_esapi::{
     structures::{EncryptedSecret, IdObject},
 };
 
+const AUTH_TIMEOUT: u64 = 15; // minutes
+const AUTH_INTERVAL: u64 = 3; // seconds
+
 #[derive(Subcommand, Debug, Clone)]
 enum NetCommands {
     Add,
@@ -126,17 +129,46 @@ async fn cmd_start(
     let (_ak_pub, _ak_name, _qualified_name) = context.read_public(ak_ecc)?;
 
     // Authenticate with server - send public keys, get challenge
-    let challenge_response: AuthChallenge = client
-        .post(format!("{}/public/auth", server_url))
-        .json(&AuthRequest {
-            ek_public,
-            ak_public,
-        })
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    // Poll every 3 seconds for up to 15 minutes if node is not yet enabled
+    let poll_interval = Duration::from_secs(AUTH_INTERVAL);
+    let max_wait_time = Duration::from_secs(AUTH_TIMEOUT * 60); // 15 minutes
+    let start_time = std::time::Instant::now();
+
+    let challenge_response: AuthChallenge = loop {
+        let response = client
+            .post(format!("{}/public/auth", server_url))
+            .json(&AuthRequest {
+                ek_public: ek_public.clone(),
+                ak_public: ak_public.clone(),
+            })
+            .send()
+            .await?;
+
+        match response.status() {
+            reqwest::StatusCode::UNAUTHORIZED => {
+                let elapsed = start_time.elapsed();
+                if elapsed >= max_wait_time {
+                    anyhow::bail!(
+                        "Authentication failed: Node not enabled after {} minutes. Contact administrator.",
+                        max_wait_time.as_secs() / 60
+                    );
+                }
+
+                println!(
+                    "Node not yet enabled by administrator. Retrying in {} seconds... ({:.0}s elapsed)",
+                    poll_interval.as_secs(),
+                    elapsed.as_secs()
+                );
+
+                tokio::time::sleep(poll_interval).await;
+                continue;
+            }
+            _ => {
+                // Either success or a different error - handle normally
+                break response.error_for_status()?.json().await?;
+            }
+        }
+    };
 
     // Unmarshal the challenge response
     let blob = IdObject::try_from(challenge_response.blob)?;
