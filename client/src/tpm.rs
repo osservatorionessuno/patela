@@ -27,6 +27,7 @@ use std::{
     convert::{TryFrom, TryInto},
     str::from_utf8,
 };
+use tss_esapi::traits::Marshall;
 
 pub fn get_persistent_handler() -> anyhow::Result<PersistentTpmHandle> {
     // Create persistent TPM handle with
@@ -340,6 +341,17 @@ pub fn resolve_attestation_challenge(
         .context("Failed to flush AK context")?;
 
     Ok(decrypted)
+}
+
+pub fn public_key_to_hex(public: &Public) -> anyhow::Result<String> {
+    let bytes = public.marshall()?;
+    Ok(hex::encode(bytes))
+}
+
+pub fn public_key_to_base64(public: &Public) -> anyhow::Result<String> {
+    use base64::Engine;
+    let bytes = public.marshall()?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 #[cfg(test)]

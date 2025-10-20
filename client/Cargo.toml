@@ -8,11 +8,13 @@ actix-tls = "3.4.0"
 aes = "0.9.0-rc.1"
 aes-gcm = "0.10.3"
 anyhow = "1.0.100"
+base64 = "0.22.1"
 clap = { version = "4.5.49", features = ["derive"] }
 elliptic-curve = { version = "0.14.0-rc.15", features = ["alloc", "pkcs8", "arithmetic", "serde"] }
 etc-passwd = "0.2.2"
 flate2 = "1.1.4"
 futures = "0.3.31"
+hex = "0.4.3"
 ipnetwork = "0.21"
 lazy_static = "1.5.0"
 mnl = "0.2.2"
@@ -26,6 +28,7 @@ primefield = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 rtnetlink = "0.18"
 rustls-pemfile = "2.2.0"
+serde = { version = "1.0.228", features = ["derive"] }
 sha2 = { version = "0.11.0-rc.2", features = ["oid"] }
 sysinfo = { version = "0.37", features = ["serde"] }
 systemctl = "0.5.0"

@@ -2,11 +2,14 @@ use actix_tls::accept::rustls_0_23::TlsStream;
 use actix_web::{
     App, FromRequest, HttpRequest, HttpResponse, HttpServer, Responder,
     dev::{Extensions, ServiceRequest},
-    error::{ErrorNotFound, ErrorUnauthorized},
+    error::{ErrorInternalServerError, ErrorNotFound, ErrorUnauthorized},
     get, middleware, post,
     rt::net::TcpStream,
     web::{self, Data, Json, Path},
 };
+use serde::{Deserialize, Serialize};
+use tss_esapi::structures::Public;
+use tss_esapi::traits::Marshall;
 
 use std::io::Read;
 
@@ -17,18 +20,12 @@ use clap_verbosity_flag::Verbosity;
 use colored::Colorize;
 use log::info;
 use patela_server::{db::*, tor_config::TorConfigParser, *};
-use rustls::{
-    RootCertStore, ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer},
-    server::WebPkiClientVerifier,
-};
+use rustls::{RootCertStore, ServerConfig, pki_types::PrivateKeyDer, server::WebPkiClientVerifier};
 use rustls_pemfile::{certs, pkcs8_private_keys};
+use sha2::Digest as _;
 use sha256::digest;
-use std::{any::Any, fs::File, io::BufReader, path::PathBuf, sync::Arc};
-use x509_parser::nom::AsBytes;
-
-use actix_web::error::ErrorInternalServerError;
 use sqlx::SqlitePool;
+use std::{any::Any, fs::File, io::BufReader, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Args, Clone)]
 struct GlobalOpts {
@@ -170,6 +167,12 @@ struct PatelaArgs {
     cmd: Commands,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct AuthRequest {
+    ek_public: Public,
+    ak_public: Public,
+}
+
 /// Long running web server and internal states
 struct PatelaServer {
     db: SqlitePool,
@@ -192,50 +195,76 @@ async fn node_id_from_request(req: &HttpRequest, pub_key: PublicKey) -> anyhow::
     Ok(node_id)
 }
 
-#[post("/create")]
-async fn create(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<impl Responder> {
-    let client_cert = req
-        .conn_data::<CertificateDer<'static>>()
-        .unwrap()
-        .as_bytes();
+// Node creation is now handled by the /auth endpoint via TPM attestation
 
-    // TODO: replace cert with public ek key of the tpm
-    let cert_digest = digest(client_cert);
-
-    Ok(Json(
-        create_node(&app.db, &cert_digest)
-            .await
-            .map_err(ErrorInternalServerError)?,
-    ))
+#[derive(Debug, Clone, Serialize)]
+struct AuthChallenge {
+    blob: Vec<u8>,
+    secret: Vec<u8>,
 }
 
-#[get("/auth")]
-async fn auth(app: Data<PatelaServer>, req: HttpRequest) -> actix_web::Result<impl Responder> {
-    let client_cert = req
-        .conn_data::<CertificateDer<'static>>()
-        .unwrap()
-        .as_bytes();
-    let cert_digest = digest(client_cert);
+#[post("/auth")]
+async fn auth(
+    app: Data<PatelaServer>,
+    body: Json<AuthRequest>,
+) -> actix_web::Result<impl Responder> {
+    let auth_req = body.into_inner();
 
-    let node = get_node_by_cert(&app.db, &cert_digest)
+    // Marshall public keys to hex strings for database storage
+    let ek_bytes = auth_req
+        .ek_public
+        .marshall()
+        .map_err(ErrorInternalServerError)?;
+    let ak_bytes = auth_req
+        .ak_public
+        .marshall()
+        .map_err(ErrorInternalServerError)?;
+
+    let ek_public_hex = hex::encode(&ek_bytes);
+    let ak_public_hex = hex::encode(&ak_bytes);
+
+    // Get or create node by EK public key
+    let node = get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex)
         .await
         .map_err(ErrorInternalServerError)?;
 
+    // Create a biscuit token that will be the session token
     let node_id = node.id;
+    let ek_digest = digest(&ek_bytes);
 
     let authority = biscuit!(
         r#"
-      node({node_id}, {cert_digest});
-      "#
+        node({node_id}, {ek_digest});
+        "#
     );
 
     let token = authority
         .build(&app.biscuit_root)
         .map_err(ErrorInternalServerError)?;
 
-    let payload = token.to_base64().map_err(ErrorInternalServerError)?;
+    // The biscuit token bytes become the challenge
+    let challenge_bytes = token.to_vec().map_err(ErrorInternalServerError)?;
 
-    Ok(HttpResponse::Ok().body(payload))
+    // Get the AK name from the AK public key
+    let ak_name = tss_esapi::structures::Name::try_from(sha2::Sha256::digest(&ak_bytes).to_vec())
+        .map_err(ErrorInternalServerError)?;
+
+    // Create attestation credentials - encrypt the biscuit token
+    let (blob, secret) = patela_server::tpm::create_attestation_credentials(
+        auth_req.ek_public,
+        ak_name,
+        &challenge_bytes,
+    )
+    .map_err(ErrorInternalServerError)?;
+
+    // Marshal the blob and secret to bytes for JSON serialization
+    let blob_bytes = blob.to_vec();
+    let secret_bytes = secret.to_vec();
+
+    Ok(HttpResponse::Ok().json(AuthChallenge {
+        blob: blob_bytes,
+        secret: secret_bytes,
+    }))
 }
 
 #[get("/config/node")]
@@ -463,7 +492,7 @@ async fn cmd_run(
     HttpServer::new(move || {
         App::new()
             .app_data(shared_data.clone())
-            .service(web::scope("/public").service(create).service(auth))
+            .service(web::scope("/public").service(auth))
             .service(
                 web::scope("/private")
                     .wrap(HttpAuthentication::bearer(ok_validator))
@@ -518,15 +547,25 @@ async fn main() -> anyhow::Result<()> {
                     "Node".bright_magenta().bold(),
                     node.id.to_string().cyan()
                 );
-                let cert_preview = if node.cert.len() > 16 {
-                    format!("{}...", &node.cert[..16])
+                let ek_preview = if node.ek_public.len() > 32 {
+                    format!("{}...", &node.ek_public[..32])
                 } else {
-                    node.cert.clone()
+                    node.ek_public.clone()
                 };
                 println!(
                     "  {} {}",
-                    "Certificate:".bright_black(),
-                    cert_preview.bright_black()
+                    "EK Public:".bright_black(),
+                    ek_preview.bright_black()
+                );
+                let ak_preview = if node.ak_public.len() > 32 {
+                    format!("{}...", &node.ak_public[..32])
+                } else {
+                    node.ak_public.clone()
+                };
+                println!(
+                    "  {} {}",
+                    "AK Public:".bright_black(),
+                    ak_preview.bright_black()
                 );
                 println!(
                     "  {} {}",

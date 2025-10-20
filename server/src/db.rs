@@ -46,9 +46,10 @@ lazy_static! {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeRecord {
     pub id: i64,
-    pub cert: String,
     pub first_seen: String,
     pub last_seen: String,
+    pub ek_public: String,
+    pub ak_public: String,
 }
 
 // Define a struct for the relay data
@@ -64,17 +65,22 @@ pub struct RelayRecord {
     pub tor_conf: Option<TorConfig>,
 }
 
-pub async fn create_node(pool: &SqlitePool, cert: &str) -> anyhow::Result<i64> {
+pub async fn create_node(
+    pool: &SqlitePool,
+    ek_public: &str,
+    ak_public: &str,
+) -> anyhow::Result<i64> {
     let mut conn = pool.acquire().await?;
 
     let now = &Local::now().to_rfc3339();
 
     let id = sqlx::query!(
         r#"
-INSERT INTO nodes ( cert, first_seen, last_seen )
-VALUES ( ?1, ?2, ?3 )
+INSERT INTO nodes ( ek_public, ak_public, first_seen, last_seen )
+VALUES ( ?1, ?2, ?3, ?4 )
         "#,
-        cert,
+        ek_public,
+        ak_public,
         now,
         now
     )
@@ -91,13 +97,80 @@ pub async fn get_nodes(pool: &SqlitePool) -> anyhow::Result<Vec<NodeRecord>> {
     let res = sqlx::query_as!(
         NodeRecord,
         r#"
-SELECT id, cert, first_seen, last_seen FROM nodes
+SELECT id, first_seen, last_seen, ek_public, ak_public FROM nodes
         "#,
     )
     .fetch_all(&mut *conn)
     .await?;
 
     Ok(res)
+}
+
+pub async fn get_or_create_node_by_ek(
+    pool: &SqlitePool,
+    ek_public: &str,
+    ak_public: &str,
+) -> anyhow::Result<NodeRecord> {
+    let mut conn = pool.acquire().await?;
+
+    // Try to find existing node by ek_public
+    let existing = sqlx::query_as!(
+        NodeRecord,
+        r#"
+SELECT id, first_seen, last_seen, ek_public, ak_public
+FROM nodes
+WHERE ek_public = ?1
+        "#,
+        ek_public
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    if let Some(mut node) = existing {
+        // Update last_seen and ak_public
+        let now = Local::now().to_rfc3339();
+        sqlx::query!(
+            r#"
+UPDATE nodes
+SET last_seen = ?1, ak_public = ?2
+WHERE id = ?3
+            "#,
+            now,
+            ak_public,
+            node.id
+        )
+        .execute(&mut *conn)
+        .await?;
+
+        node.last_seen = now;
+        node.ak_public = ak_public.to_string();
+        Ok(node)
+    } else {
+        // Create new node with ek_public and ak_public
+        let now = Local::now().to_rfc3339();
+
+        let id = sqlx::query!(
+            r#"
+INSERT INTO nodes (first_seen, last_seen, ek_public, ak_public)
+VALUES (?1, ?2, ?3, ?4)
+            "#,
+            now,
+            now,
+            ek_public,
+            ak_public
+        )
+        .execute(&mut *conn)
+        .await?
+        .last_insert_rowid();
+
+        Ok(NodeRecord {
+            id,
+            first_seen: now.clone(),
+            last_seen: now,
+            ek_public: ek_public.to_string(),
+            ak_public: ak_public.to_string(),
+        })
+    }
 }
 
 pub async fn remove_node(pool: &SqlitePool, id: i64) -> anyhow::Result<i64> {
@@ -115,23 +188,6 @@ WHERE id = ?
     .last_insert_rowid();
 
     Ok(id)
-}
-
-pub async fn get_node_by_cert(pool: &SqlitePool, cert: &str) -> anyhow::Result<NodeRecord> {
-    let mut conn = pool.acquire().await?;
-
-    let res = sqlx::query_as!(
-        NodeRecord,
-        r#"
-SELECT id, cert, first_seen, last_seen FROM nodes
-WHERE cert = ?
-        "#,
-        cert
-    )
-    .fetch_one(&mut *conn)
-    .await?;
-
-    Ok(res)
 }
 
 pub async fn create_relay(
