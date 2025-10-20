@@ -12,10 +12,18 @@ use clap::Parser;
 use clap::clap_derive::Subcommand;
 use etc_passwd::Passwd;
 use ipnetwork::IpNetwork;
-use patela_client::{api::build_client, tpm::*, *};
+use patela_client::{
+    api::{AuthChallenge, AuthRequest, build_client},
+    tpm::*,
+    *,
+};
 use patela_server::{NodeConfig, TorRelayConf};
 use systemctl::SystemCtl;
-use tss_esapi::{Context, TctiNameConf, handles::KeyHandle};
+use tss_esapi::{
+    Context, TctiNameConf,
+    handles::KeyHandle,
+    structures::{EncryptedSecret, IdObject},
+};
 
 #[derive(Subcommand, Debug, Clone)]
 enum NetCommands {
@@ -112,42 +120,38 @@ async fn cmd_start(
         false => println!("This is not my first time here!"),
     }
 
+    let (ek_ecc, ek_public, ak_ecc, ak_public) = load_attestation_keys(context)?;
+
     let client = build_client().await?;
 
-    if is_first_run {
-        let node_id = client
-            .post(format!("{}/public/create", server_url))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<i64>()
-            .await?;
+    // Get the AK name for the challenge
+    let (_ak_pub, _ak_name, _qualified_name) = context.read_public(ak_ecc)?;
 
-        println!("Create new node on the server with id {}", node_id);
-    }
-
-    // Authenticate with server
-    let session_token = client
-        .get(format!("{}/public/auth", server_url))
+    // Authenticate with server - send public keys, get challenge
+    let challenge_response: AuthChallenge = client
+        .post(format!("{}/public/auth", server_url))
+        .json(&AuthRequest {
+            ek_public,
+            ak_public,
+        })
         .send()
         .await?
         .error_for_status()?
-        .text()
+        .json()
         .await?;
 
-    println!("Succesfuly authenticathed with server");
+    // Unmarshal the challenge response
+    let blob = IdObject::try_from(challenge_response.blob)?;
+    let secret = EncryptedSecret::try_from(challenge_response.secret)?;
 
-    // Generate or fetch aes key and nonce
-    let (_cipher, _nonce) = match is_first_run {
-        true => {
-            println!("Generate aes-gcm key and nonce for bkp encryption...");
-            generate_aes_cipher_and_store(context, &client, &server_url, &session_token).await
-        }
-        false => {
-            println!("Restore encrypted aes-gcm key and nonce from server...");
-            fetch_aes_key(context, &client, &server_url, &session_token).await
-        }
-    }?;
+    // Resolve the attestation challenge
+    let session_token_digest =
+        resolve_attestation_challenge(context, ek_ecc, ak_ecc, blob, secret)?;
+
+    // Convert Digest to hex string for bearer token
+    let session_token = hex::encode(session_token_digest.as_bytes());
+
+    println!("Successfully authenticated with server");
 
     // Configuration are send in any case
     let specs = collect_specs()?;
@@ -366,11 +370,17 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
             // Get the AK name
             let (_ak_pub, ak_name, _qualified_name) = context.read_public(ak_ecc)?;
 
-            // create the attestation challange with real tpm (can be done without TPM context)
+            println!("EK Public (hex): {}", public_key_to_hex(&ek_public)?);
+            println!("AK Public (hex): {}", public_key_to_hex(&ak_public)?);
+
+            // Create the attestation challenge with real tpm (can be done without TPM context)
             let challenge = b"test challenge data";
             let (blob, secret) =
                 patela_server::tpm::create_attestation_credentials(ek_public, ak_name, challenge)?;
-            let _result = resolve_attestation_challenge(context, ek_ecc, ak_ecc, blob, secret)?;
+            let result = resolve_attestation_challenge(context, ek_ecc, ak_ecc, blob, secret)?;
+
+            println!("Challenge resolved successfully!");
+            println!("Result: {}", hex::encode(result.as_bytes()));
         }
     }
 

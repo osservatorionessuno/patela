@@ -1,10 +1,24 @@
 use std::time::Duration;
 
 use reqwest::{Client, tls};
+use serde::{Deserialize, Serialize};
+use tss_esapi::structures::Public;
 
 use crate::SERVER_CA;
 
 const SERVER_TIMEOUT_SEC: u64 = 5;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthRequest {
+    pub ek_public: Public,
+    pub ak_public: Public,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthChallenge {
+    pub blob: Vec<u8>,
+    pub secret: Vec<u8>,
+}
 
 pub async fn build_client() -> Result<Client, reqwest::Error> {
     let builder = reqwest::Client::builder()
