@@ -36,6 +36,8 @@ pub struct TorRelayConf {
     pub or_port: u16,
     pub bandwidth_rate: u16,
     pub bandwidth_burst: u16,
+    pub v4_netmask: u8,
+    pub v6_netmask: u8,
 }
 
 impl Display for TorRelayConf {

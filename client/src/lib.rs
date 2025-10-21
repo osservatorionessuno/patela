@@ -558,6 +558,8 @@ IPv6Exit 1
             or_port: 9001,
             bandwidth_rate: 10,
             bandwidth_burst: 100,
+            v4_netmask: 24,
+            v6_netmask: 48,
             policy: vec![
                 TorPolicy {
                     verb: TorPolicyVerb::Reject,

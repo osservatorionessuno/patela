@@ -29,13 +29,15 @@ DROP TABLE nodes;
 ALTER TABLE nodes_old RENAME TO nodes;
 
 -- ==============================================================================
--- STEP 2: Drop configuration hierarchy
+-- STEP 2: Drop configuration hierarchy and netmask fields
 -- ==============================================================================
 
 DROP INDEX IF EXISTS idx_global_conf_id;
 DROP TABLE IF EXISTS global_conf;
 
 ALTER TABLE relays DROP COLUMN tor_conf;
+ALTER TABLE relays DROP COLUMN v4_netmask;
+ALTER TABLE relays DROP COLUMN v6_netmask;
 
 -- ==============================================================================
 -- STEP 3: Restore legacy columns
