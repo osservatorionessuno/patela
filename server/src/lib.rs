@@ -22,7 +22,8 @@ lazy_static! {
 pub struct NetworkConf {
     pub ipv4_gateway: String,
     pub ipv6_gateway: String,
-    pub dns_server: String,
+    pub dns_server: Option<String>,
+    pub interface_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

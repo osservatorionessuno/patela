@@ -102,6 +102,33 @@ pub fn generate_torrc(relay: &patela_server::db::ResolvedRelayRecord) -> anyhow:
     Ok(torrc_lines.join("\n"))
 }
 
+// Find network interface by the name
+pub async fn find_network_interface_by_name(
+    handle: &rtnetlink::Handle,
+    target: &String,
+) -> anyhow::Result<u32> {
+    let mut links = handle
+        .link()
+        .get()
+        .set_filter_mask(AddressFamily::Inet, vec![LinkExtentMask::Brvlan])
+        .execute();
+
+    while let Some(msg) = links.try_next().await? {
+        for nla in msg.attributes.into_iter() {
+            match nla {
+                LinkAttribute::IfName(name) => {
+                    if name.eq(target) {
+                        return Ok(msg.header.index);
+                    }
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    anyhow::bail!("No network interface {}", target)
+}
+
 // Find the first ethernet interface without an ip
 pub async fn find_network_interface(handle: &rtnetlink::Handle) -> anyhow::Result<u32> {
     let mut links = handle

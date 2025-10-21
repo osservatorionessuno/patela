@@ -249,8 +249,13 @@ async fn cmd_start(
         let (connection, net_handle, _) = rtnetlink::new_connection()?;
         tokio::spawn(connection);
 
-        // TODO: let override this configuration from server
-        let interface_index = find_network_interface(&net_handle).await?;
+        let interface_index = match node_conf.network.interface_name {
+            Some(interface_name) => {
+                find_network_interface_by_name(&net_handle, &interface_name).await?
+            }
+            None => find_network_interface(&net_handle).await?,
+        };
+
         set_link_up(&net_handle, interface_index).await?;
 
         println!("Checking existing network addresses...");

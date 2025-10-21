@@ -1054,7 +1054,8 @@ ControlPort 9999
             network: NetworkConf {
                 ipv4_gateway: "10.0.0.1".to_string(),
                 ipv6_gateway: "fe80::1".to_string(),
-                dns_server: "8.8.8.8".to_string(),
+                dns_server: Some("8.8.8.8".to_string()),
+                interface_name: None,
             },
         };
 
@@ -1071,7 +1072,7 @@ ControlPort 9999
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.network.ipv4_gateway, "10.0.0.1");
         assert_eq!(retrieved.network.ipv6_gateway, "fe80::1");
-        assert_eq!(retrieved.network.dns_server, "8.8.8.8");
+        assert_eq!(retrieved.network.dns_server, Some("8.8.8.8".to_string()));
 
         Ok(())
     }
@@ -1084,7 +1085,8 @@ ControlPort 9999
             network: NetworkConf {
                 ipv4_gateway: "192.168.1.1".to_string(),
                 ipv6_gateway: "fe80::2".to_string(),
-                dns_server: "1.1.1.1".to_string(),
+                dns_server: Some("1.1.1.1".to_string()),
+                interface_name: Some("eth0".to_string()),
             },
         };
 
@@ -1193,7 +1195,8 @@ ControlPort 9999
             network: NetworkConf {
                 ipv4_gateway: "10.0.0.1".to_string(),
                 ipv6_gateway: "fe80::1".to_string(),
-                dns_server: "8.8.8.8".to_string(),
+                dns_server: Some("8.8.8.8".to_string()),
+                interface_name: None,
             },
         };
         set_global_node_conf(&pool, &global_conf).await.unwrap();
@@ -1212,7 +1215,8 @@ ControlPort 9999
             network: NetworkConf {
                 ipv4_gateway: "192.168.1.1".to_string(),
                 ipv6_gateway: "fe80::2".to_string(),
-                dns_server: "1.1.1.1".to_string(),
+                dns_server: Some("1.1.1.1".to_string()),
+                interface_name: None,
             },
         };
         set_node_node_conf(&pool, node_id, &node_conf)
