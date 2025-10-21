@@ -145,7 +145,6 @@ enum Commands {
     Run(CmdRunArgs),
     /// List nodes and relays
     List {
-        // TODO: default to all
         #[command(subcommand)]
         resource: CmdListScope,
         /// limit the result by name

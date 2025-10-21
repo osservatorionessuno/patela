@@ -1,6 +1,8 @@
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp,
+    env,
     fmt::{self, Display},
 };
 
@@ -8,8 +10,16 @@ pub mod db;
 pub mod tor_config;
 pub mod tpm;
 
-const RELAY_MEMORY_BOUND: u64 = 1024; // TODO: configurable
-pub const RELAY_OR_PORT: u16 = 9001;
+lazy_static! {
+    static ref RELAY_MEMORY_BOUND: u64 = env::var("PATELA_RELAY_MEMORY_BOUND")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024);
+    pub static ref RELAY_OR_PORT: u16 = env::var("PATELA_RELAY_OR_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9001);
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TorPolicyVerb {
@@ -91,7 +101,7 @@ pub struct NodeConfig {
 /// 2. For exit relay is good to have at least 500/700M memory space
 pub fn how_many_relay(memory: u64, n_cpus: usize) -> u64 {
     // the low bound between cores and memory
-    cmp::min((memory >> 20) / RELAY_MEMORY_BOUND, n_cpus as u64)
+    cmp::min((memory >> 20) / *RELAY_MEMORY_BOUND, n_cpus as u64)
 }
 
 #[test]
