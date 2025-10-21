@@ -18,10 +18,10 @@ use patela_client::{
     *,
 };
 use patela_server::{NodeConfig, db::ResolvedRelayRecord};
+use reqwest::StatusCode;
 use systemctl::SystemCtl;
 use tss_esapi::{
     Context, TctiNameConf,
-    handles::KeyHandle,
     structures::{EncryptedSecret, IdObject},
 };
 
@@ -109,18 +109,7 @@ async fn cmd_start(
 
     let context = &mut Context::new(tpm_device_name)?;
 
-    // If the key are found in the tpm assume is not the first run
-    // In other case create and get the id
-    let (_primary_key, is_first_run): (KeyHandle, bool) =
-        match find_persistent_handle(context, get_persistent_handler()?)? {
-            Some(object) => (object.into(), false),
-            None => (create_and_persist(context)?, true),
-        };
-
-    match is_first_run {
-        true => println!("This is the first boot for patela!"),
-        false => println!("This is not my first time here!"),
-    }
+    println!("Load attestation keys");
 
     let (ek_ecc, ek_public, ak_ecc, ak_public) = load_attestation_keys(context)?;
 
@@ -129,13 +118,15 @@ async fn cmd_start(
     // Get the AK name for the challenge
     let (_ak_pub, _ak_name, _qualified_name) = context.read_public(ak_ecc)?;
 
+    println!("Ask for authentication to the server");
+
     // Authenticate with server - send public keys, get challenge
     // Poll every 3 seconds for up to 15 minutes if node is not yet enabled
     let poll_interval = Duration::from_secs(AUTH_INTERVAL);
     let max_wait_time = Duration::from_secs(AUTH_TIMEOUT * 60); // 15 minutes
     let start_time = std::time::Instant::now();
 
-    let challenge_response: AuthChallenge = loop {
+    let (is_first_time, challange_response): (bool, AuthChallenge) = loop {
         let response = client
             .post(format!("{}/public/auth", server_url))
             .json(&AuthRequest {
@@ -146,7 +137,7 @@ async fn cmd_start(
             .await?;
 
         match response.status() {
-            reqwest::StatusCode::UNAUTHORIZED => {
+            StatusCode::UNAUTHORIZED => {
                 let elapsed = start_time.elapsed();
                 if elapsed >= max_wait_time {
                     anyhow::bail!(
@@ -164,16 +155,25 @@ async fn cmd_start(
                 tokio::time::sleep(poll_interval).await;
                 continue;
             }
+            StatusCode::CREATED => {
+                println!("This is the first boot for patela!");
+                break (true, response.json().await?);
+            }
+            StatusCode::OK => {
+                println!("This is not my first time here!");
+                break (false, response.json().await?);
+            }
             _ => {
                 // Either success or a different error - handle normally
-                break response.error_for_status()?.json().await?;
+                response.error_for_status()?;
+                anyhow::bail!("Unexpected response from server during authentication");
             }
         }
     };
 
     // Unmarshal the challenge response
-    let blob = IdObject::try_from(challenge_response.blob)?;
-    let secret = EncryptedSecret::try_from(challenge_response.secret)?;
+    let blob = IdObject::try_from(challange_response.blob)?;
+    let secret = EncryptedSecret::try_from(challange_response.secret)?;
 
     // Resolve the attestation challenge
     let session_token_digest =
@@ -307,7 +307,7 @@ async fn cmd_start(
         add_default_route_v6(node_conf.network.ipv6_gateway.parse()?, &net_handle).await?;
     }
 
-    if !is_first_run && !skip_restore {
+    if !is_first_time && !skip_restore {
         println!("Fetch tor keys backup");
 
         for relay in relays.iter() {

@@ -234,7 +234,7 @@ async fn auth(
     let ak_public_hex = hex::encode(&ak_bytes);
 
     // Get or create node by EK public key
-    let node = get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex)
+    let (node, is_created) = get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex)
         .await
         .map_err(ErrorInternalServerError)?;
 
@@ -278,10 +278,17 @@ async fn auth(
     let blob_bytes = blob.to_vec();
     let secret_bytes = secret.to_vec();
 
-    Ok(HttpResponse::Ok().json(AuthChallenge {
+    let auth_response = AuthChallenge {
         blob: blob_bytes,
         secret: secret_bytes,
-    }))
+    };
+
+    // Return 201 CREATED for new nodes, 200 OK for existing nodes
+    if is_created {
+        Ok(HttpResponse::Created().json(auth_response))
+    } else {
+        Ok(HttpResponse::Ok().json(auth_response))
+    }
 }
 
 #[get("/config/node")]

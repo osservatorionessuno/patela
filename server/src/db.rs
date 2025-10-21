@@ -101,7 +101,7 @@ pub async fn get_or_create_node_by_ek(
     pool: &SqlitePool,
     ek_public: &str,
     ak_public: &str,
-) -> anyhow::Result<NodeRecord> {
+) -> anyhow::Result<(NodeRecord, bool)> {
     let mut conn = pool.acquire().await?;
 
     // Try to find existing node by ek_public
@@ -135,7 +135,7 @@ WHERE id = ?3
 
         node.last_seen = now;
         node.ak_public = ak_public.to_string();
-        Ok(node)
+        Ok((node, false)) // Existing node, not created
     } else {
         // Create new node with ek_public and ak_public
         let now = Local::now().to_rfc3339();
@@ -154,14 +154,17 @@ VALUES (?1, ?2, ?3, ?4)
         .await?
         .last_insert_rowid();
 
-        Ok(NodeRecord {
-            id,
-            first_seen: now.clone(),
-            last_seen: now,
-            enabled: false, // New nodes default to disabled, require manual approval
-            ek_public: ek_public.to_string(),
-            ak_public: ak_public.to_string(),
-        })
+        Ok((
+            NodeRecord {
+                id,
+                first_seen: now.clone(),
+                last_seen: now,
+                enabled: false, // New nodes default to disabled, require manual approval
+                ek_public: ek_public.to_string(),
+                ak_public: ak_public.to_string(),
+            },
+            true, // New node, was created
+        ))
     }
 }
 
@@ -905,18 +908,20 @@ ControlPort 9999
         let ak = "unique_ak_hex";
 
         // First call creates the node
-        let node1 = get_or_create_node_by_ek(&pool, ek, ak).await.unwrap();
+        let (node1, created1) = get_or_create_node_by_ek(&pool, ek, ak).await.unwrap();
         assert_eq!(node1.ek_public, ek);
         assert_eq!(node1.ak_public, ak);
         assert_eq!(node1.enabled, false); // Should default to disabled
+        assert!(created1); // Should be newly created
 
         // Second call returns the existing node
-        let node2 = get_or_create_node_by_ek(&pool, ek, "new_ak_hex")
+        let (node2, created2) = get_or_create_node_by_ek(&pool, ek, "new_ak_hex")
             .await
             .unwrap();
         assert_eq!(node2.id, node1.id);
         assert_eq!(node2.ek_public, ek);
         assert_eq!(node2.ak_public, "new_ak_hex"); // AK should be updated
+        assert!(!created2); // Should not be newly created
 
         Ok(())
     }
@@ -926,7 +931,7 @@ ControlPort 9999
         let ek = "to_delete_ek";
         let ak = "to_delete_ak";
 
-        let node = get_or_create_node_by_ek(&pool, ek, ak).await.unwrap();
+        let (node, _) = get_or_create_node_by_ek(&pool, ek, ak).await.unwrap();
 
         // Node exists
         let found = get_or_create_node_by_ek(&pool, ek, ak).await;
