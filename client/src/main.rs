@@ -52,7 +52,6 @@ enum Commands {
     Start {
         #[arg(long, env = "PATELA_SERVER")]
         server: String,
-        // TODO: use action also in new server cli
         #[arg(long, action, help = "Do not run network setup")]
         skip_net: bool,
         #[arg(long, action, help = "Do not try to restore long term keys")]

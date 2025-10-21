@@ -76,13 +76,13 @@ enum CmdVerbScope {
     Node {
         /// Node ID
         #[arg(long)]
-        node_id: i64,
+        id: i64,
     },
     /// Relay-specific configuration override
     Relay {
         /// Relay name (cheese name)
         #[arg(long)]
-        relay_name: String,
+        id: String,
     },
 }
 
@@ -602,11 +602,7 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     "disabled".red().bold()
                 };
-                println!(
-                    "  {} {}",
-                    "Status:     ".bright_black(),
-                    status_text
-                );
+                println!("  {} {}", "Status:     ".bright_black(), status_text);
 
                 let relays = get_relays_conf(&pool, node.id).await?;
                 if !relays.is_empty() {
@@ -649,24 +645,24 @@ async fn main() -> anyhow::Result<()> {
                             "Global default configuration imported successfully".green()
                         );
                     }
-                    CmdVerbScope::Node { node_id } => {
+                    CmdVerbScope::Node { id } => {
                         // Filter out ORPort and Nickname for node config
                         let filtered_conf = filter_tor_config(&tor_conf);
-                        set_node_tor_conf(&pool, node_id, &filtered_conf).await?;
+                        set_node_tor_conf(&pool, id, &filtered_conf).await?;
                         println!(
                             "{} Node {} configuration imported successfully",
                             "✓".green().bold(),
-                            node_id.to_string().cyan()
+                            id.to_string().cyan()
                         );
                     }
-                    CmdVerbScope::Relay { relay_name } => {
+                    CmdVerbScope::Relay { id } => {
                         // No filtering for relay config
-                        let (_node_id, relay_id) = get_relay_ids(&pool, &relay_name).await?;
+                        let (_node_id, relay_id) = get_relay_ids(&pool, &id).await?;
                         set_relay_tor_conf(&pool, relay_id, &tor_conf).await?;
                         println!(
                             "{} Relay '{}' (id:{}) configuration imported successfully",
                             "✓".green().bold(),
-                            relay_name.cyan(),
+                            id.cyan(),
                             relay_id.to_string().yellow()
                         );
                     }
@@ -675,9 +671,9 @@ async fn main() -> anyhow::Result<()> {
             CmdConfVerb::Get { scope, json } => {
                 let conf = match scope {
                     CmdVerbScope::Default => get_global_tor_conf(&pool).await?,
-                    CmdVerbScope::Node { node_id } => get_node_tor_conf(&pool, node_id).await?,
-                    CmdVerbScope::Relay { relay_name } => {
-                        let (_, relay_id) = get_relay_ids(&pool, &relay_name).await?;
+                    CmdVerbScope::Node { id } => get_node_tor_conf(&pool, id).await?,
+                    CmdVerbScope::Relay { id } => {
+                        let (_, relay_id) = get_relay_ids(&pool, &id).await?;
                         get_relay_tor_conf(&pool, relay_id).await?
                     }
                 };
