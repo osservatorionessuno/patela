@@ -1,10 +1,6 @@
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::{
-    cmp,
-    env,
-    fmt::{self, Display},
-};
+use std::{cmp, env};
 
 pub mod db;
 pub mod tor_config;
@@ -19,45 +15,6 @@ lazy_static! {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(9001);
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum TorPolicyVerb {
-    Accept,
-    Reject,
-}
-
-/// Tor policy rules are defined for `ip/mask:port`, for simplicity are defined as a simple string
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TorPolicy {
-    pub verb: TorPolicyVerb,
-    pub object: String,
-}
-
-/// Tor configuration, this is just a small small subset of all the possible configuration, but is
-/// ok for the use of an exit node
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TorRelayConf {
-    pub name: String,
-    pub family: String,
-    pub policy: Vec<TorPolicy>,
-    pub or_address_v4: String,
-    pub or_address_v6: String,
-    pub or_port: u16,
-    pub bandwidth_rate: u16,
-    pub bandwidth_burst: u16,
-    pub v4_netmask: u8,
-    pub v6_netmask: u8,
-}
-
-impl Display for TorRelayConf {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}\t\t{}\t{}",
-            self.name, self.or_address_v4, self.or_address_v6
-        )
-    }
 }
 
 /// This is not used now because we assume dhcp server working correctly

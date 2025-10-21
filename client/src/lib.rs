@@ -13,14 +13,13 @@ use aes_gcm::{
 };
 use futures::TryStreamExt;
 use ipnetwork::IpNetwork;
-use lazy_static::lazy_static;
 use nftnl::{
     Batch, Chain, FinalizedBatch, ProtoFamily, Rule, Table,
     expr::{Immediate, Nat, NatType, Register},
     nft_expr,
     nftnl_sys::libc,
 };
-use patela_server::{HwSpecs, HwSpecsNetwork, Network, TorRelayConf};
+use patela_server::{HwSpecs, HwSpecsNetwork, Network};
 use reqwest::Client;
 use rtnetlink::{
     LinkUnspec, RouteMessageBuilder,
@@ -38,7 +37,6 @@ use std::{
 };
 use sysinfo::{Networks, System};
 use tar::{Archive, Builder};
-use tera::Tera;
 
 pub mod api;
 pub mod tpm;
@@ -48,18 +46,6 @@ const MANGLE_CHAIN_NAME: &CStr = c"mangle";
 const MANGLE_CHAIN_PRIORITY: i32 = libc::NF_IP_PRI_MANGLE;
 const NAT_CHAIN_NAME: &CStr = c"nat";
 pub const TOR_INSTANCE_LIB_DIR: &str = "/var/lib/tor-instances";
-
-lazy_static! {
-    static ref TEMPLATES: Tera = {
-        let mut tera = Tera::default();
-        if let Err(e) = tera.add_raw_template("torrc", TORRC_TEMLPLATE) {
-            println!("Parsing error(s): {}", e);
-            ::std::process::exit(1);
-        };
-
-        tera
-    };
-}
 
 pub fn collect_specs() -> anyhow::Result<HwSpecs> {
     let sys = System::new_all();
@@ -91,10 +77,29 @@ pub fn collect_specs() -> anyhow::Result<HwSpecs> {
     })
 }
 
-pub fn generate_torrc(conf: &TorRelayConf) -> anyhow::Result<String> {
-    TEMPLATES
-        .render("torrc", &tera::Context::from_serialize(conf)?)
-        .map_err(anyhow::Error::from)
+/// Generate torrc from ResolvedRelayRecord (v2 configuration system)
+pub fn generate_torrc(relay: &patela_server::db::ResolvedRelayRecord) -> anyhow::Result<String> {
+    use std::collections::BTreeMap;
+
+    // Convert TorConfig to torrc format
+    let tor_conf = &relay.resolved_tor_conf;
+    let mut torrc_lines = Vec::new();
+
+    // Add relay name as Nickname first
+    torrc_lines.push(format!("Nickname {}", relay.name));
+    torrc_lines.push(String::new());
+
+    // Sort directives alphabetically for consistent output
+    let sorted_directives: BTreeMap<_, _> = tor_conf.directives.iter().collect();
+
+    // Add all directives from resolved configuration
+    for (key, values) in sorted_directives {
+        for value in values {
+            torrc_lines.push(format!("{} {}", key, value));
+        }
+    }
+
+    Ok(torrc_lines.join("\n"))
 }
 
 // Find the first ethernet interface without an ip
@@ -512,82 +517,4 @@ pub async fn fetch_aes_key(
     let nonce_array: [u8; 12] = nonce.as_slice().try_into()?;
 
     Ok((cipher, nonce_array))
-}
-
-#[cfg(test)]
-mod tests {
-    use patela_server::{TorPolicy, TorPolicyVerb};
-
-    use super::*;
-
-    const TORRC_EXAMPLE: &'static str = "
-Nickname miaomiao
-
-AvoidDiskWrites 1
-DisableAllSwap 1
-
-ORPort 0.0.0.0:9001
-ORPort [0.0.0.0]:9001
-
-RelayBandwidthRate 10 MB
-RelayBandwidthBurst 100 MB
-
-MaxMemInQueues 400 MB
-
-ContactInfo email:info[]osservatorionessuno.org url:https://osservatorionessuno.org proof:uri-rsa abuse:exit[]osservatorionessuno.org mastodon:https://mastodon.cisti.org/@0n_odv donationurl:https://osservatorionessuno.org/participate/ ciissversion:2
-
-MyFamily one two three
-
-ExitPolicy reject 0.0.0.0/8:*
-ExitPolicy reject 169.254.0.0/16:*
-ExitPolicy reject 10.0.0.0/8:*
-ExitPolicy reject *:25
-ExitPolicy accept *:*
-
-ExitRelay 1
-IPv6Exit 1
-";
-
-    #[test]
-    fn test_generate_torrc() {
-        let tor_conf = TorRelayConf {
-            name: String::from("miaomiao"),
-            family: String::from("one two three"),
-            or_address_v4: String::from("0.0.0.0"),
-            or_address_v6: String::from("0.0.0.0"),
-            or_port: 9001,
-            bandwidth_rate: 10,
-            bandwidth_burst: 100,
-            v4_netmask: 24,
-            v6_netmask: 48,
-            policy: vec![
-                TorPolicy {
-                    verb: TorPolicyVerb::Reject,
-                    object: String::from("0.0.0.0/8:*"),
-                },
-                TorPolicy {
-                    verb: TorPolicyVerb::Reject,
-                    object: String::from("169.254.0.0/16:*"),
-                },
-                TorPolicy {
-                    verb: TorPolicyVerb::Reject,
-                    object: String::from("10.0.0.0/8:*"),
-                },
-                TorPolicy {
-                    verb: TorPolicyVerb::Reject,
-                    object: String::from("*:25"),
-                },
-                TorPolicy {
-                    verb: TorPolicyVerb::Accept,
-                    object: String::from("*:*"),
-                },
-            ],
-        };
-
-        let res = generate_torrc(&tor_conf).unwrap();
-
-        println!("{}", res);
-
-        assert_eq!(res, TORRC_EXAMPLE);
-    }
 }

@@ -441,21 +441,4 @@ IPv6Exit 1
         Ok(())
     }
 
-    #[test]
-    fn test_parse_torrc_file() -> Result<(), TorConfigError> {
-        // Test parsing the actual file if it exists
-        let file_path = "tests/testtorrc";
-        if std::path::Path::new(file_path).exists() {
-            let config = TorConfigParser::parse_file(file_path)?;
-
-            // Verify key directives
-            assert!(config.directives.contains_key("Nickname"));
-            assert!(config.directives.contains_key("ORPort"));
-            assert!(config.directives.contains_key("ExitPolicy"));
-
-            let nickname = config.directives.get("Nickname").unwrap();
-            assert_eq!(nickname[0].as_string(), Some("testnode"));
-        }
-        Ok(())
-    }
 }

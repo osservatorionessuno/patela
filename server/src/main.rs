@@ -224,6 +224,7 @@ async fn auth(
         .ek_public
         .marshall()
         .map_err(ErrorInternalServerError)?;
+
     let ak_bytes = auth_req
         .ak_public
         .marshall()
@@ -293,21 +294,23 @@ async fn get_config_node(
         .map_err(ErrorNotFound)?;
 
     // look for relays already created
-    let mut tor_relays = get_relays_conf(&app.db, node_id)
+    let mut tor_relays = get_resolved_node_relays_conf(&app.db, node_id)
         .await
         .map_err(ErrorNotFound)?;
 
+    // find last valid specs
+    let spec = get_last_node_spec(&app.db, node_id)
+        .await
+        .map_err(ErrorInternalServerError)?;
+
+    // calculate how many
+    let n_relays = how_many_relay(spec.memory, spec.n_cpus);
+
     // Relay conf are created lazy
-    if tor_relays.is_empty() {
-        // find last valid specs
-        let spec = get_last_node_spec(&app.db, node_id)
-            .await
-            .map_err(ErrorInternalServerError)?;
-
-        // calculate how many
-        let n_relays = how_many_relay(spec.memory, spec.n_cpus);
-
-        for _ in 0..n_relays {
+    // Supporto only append new relay, not delete already created
+    let missing_relays = n_relays.saturating_sub(tor_relays.len() as u64);
+    if missing_relays > 0 {
+        for _ in 0..missing_relays {
             let (cheese_id, _) = allocate_cheese(&app.db)
                 .await
                 .map_err(ErrorInternalServerError)?;
@@ -316,7 +319,7 @@ async fn get_config_node(
                 .await
                 .map_err(ErrorInternalServerError)?;
 
-            let relay_id = create_relay(
+            let _ = create_relay(
                 &app.db,
                 node_id,
                 cheese_id,
@@ -327,16 +330,13 @@ async fn get_config_node(
             )
             .await
             .map_err(ErrorInternalServerError)?;
-
-            let _resolved_conf = get_resolved_relay_conf(&app.db, node_id, relay_id)
-                .await
-                .map_err(ErrorInternalServerError)?;
         }
 
         // Reload relays from db, this is redundand and can be done in the create
-        tor_relays = get_relays_conf(&app.db, node_id)
+        // look for relays already created
+        tor_relays = get_resolved_node_relays_conf(&app.db, node_id)
             .await
-            .map_err(ErrorInternalServerError)?;
+            .map_err(ErrorNotFound)?;
     }
 
     Ok(Json(tor_relays))

@@ -17,7 +17,7 @@ use patela_client::{
     tpm::*,
     *,
 };
-use patela_server::{NodeConfig, TorRelayConf};
+use patela_server::{NodeConfig, db::ResolvedRelayRecord};
 use systemctl::SystemCtl;
 use tss_esapi::{
     Context, TctiNameConf,
@@ -207,7 +207,7 @@ async fn cmd_start(
         .send()
         .await?
         .error_for_status()?
-        .json::<Vec<TorRelayConf>>()
+        .json::<Vec<ResolvedRelayRecord>>()
         .await?;
 
     for relay in relays.iter() {
@@ -265,15 +265,15 @@ async fn cmd_start(
 
         println!("Configuring relay IP addresses...");
         for relay in relays.iter() {
-            let relay_ipv4: Ipv4Addr = relay.or_address_v4.parse()?;
-            let relay_ipv6: Ipv6Addr = relay.or_address_v6.parse()?;
+            let relay_ipv4: Ipv4Addr = relay.ip_v4.parse()?;
+            let relay_ipv6: Ipv6Addr = relay.ip_v6.parse()?;
 
             if !addresses.contains(&IpAddr::V4(relay_ipv4)) {
                 println!(
                     "Adding IPv4 address {}/{} for relay {}",
                     relay_ipv4, relay.v4_netmask, relay.name
                 );
-                let ipv4_network = IpNetwork::new(IpAddr::V4(relay_ipv4), relay.v4_netmask)?;
+                let ipv4_network = IpNetwork::new(IpAddr::V4(relay_ipv4), relay.v4_netmask as u8)?;
                 add_network_address(interface_index, ipv4_network, &net_handle).await?;
             } else {
                 println!(
@@ -287,7 +287,7 @@ async fn cmd_start(
                     "Adding IPv6 address {}/{} for relay {}",
                     relay_ipv6, relay.v6_netmask, relay.name
                 );
-                let ipv6_network = IpNetwork::new(IpAddr::V6(relay_ipv6), relay.v6_netmask)?;
+                let ipv6_network = IpNetwork::new(IpAddr::V6(relay_ipv6), relay.v6_netmask as u8)?;
                 add_network_address(interface_index, ipv6_network, &net_handle).await?;
             } else {
                 println!(
@@ -341,7 +341,7 @@ async fn cmd_start(
 
     tokio::time::sleep(Duration::from_secs(wait_seconds)).await;
 
-    for relay in relays.iter() {
+    for _relay in relays.iter() {
         // TODO: backup in tpm
     }
 

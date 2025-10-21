@@ -11,18 +11,6 @@ use std::{
     str::FromStr,
 };
 
-// What in the db? Why the db?
-//
-// - list of valid relay names
-// - assigned ip to relay
-// - default global conf
-// - node conf overrides
-// - relay conf overrides
-//
-// For our need the db could be a very simple fs/file db, probably we don't need to do real sql
-// query, but the life is to short to learn another db? A valid alternative could be to have an fs
-// db with all the configuration and just file blobs dropped around.
-
 // TODO: extend db conf to handle multiple ip pools
 lazy_static! {
     static ref FIRST_IP_4: Ipv4Addr = env::var("PATELA_FIRST_V4")
@@ -170,7 +158,7 @@ VALUES (?1, ?2, ?3, ?4)
             id,
             first_seen: now.clone(),
             last_seen: now,
-            enabled: false,  // New nodes default to disabled, require manual approval
+            enabled: false, // New nodes default to disabled, require manual approval
             ek_public: ek_public.to_string(),
             ak_public: ak_public.to_string(),
         })
@@ -740,6 +728,65 @@ pub async fn get_resolved_relay_conf(
     ))
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResolvedRelayRecord {
+    pub id: i64,
+    pub node_id: i64,
+    pub cheese_id: i64,
+    pub name: String,
+    pub date: String,
+    pub ip_v4: String,
+    pub ip_v6: String,
+    pub v4_netmask: i64,
+    pub v6_netmask: i64,
+    pub resolved_tor_conf: TorConfig,
+}
+
+impl std::fmt::Display for ResolvedRelayRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}\t\t{}\t{}", self.name, self.ip_v4, self.ip_v6)
+    }
+}
+
+/// Get all relays for a specific node with their fully resolved Tor configurations
+pub async fn get_resolved_node_relays_conf(
+    pool: &SqlitePool,
+    node_id: i64,
+) -> anyhow::Result<Vec<ResolvedRelayRecord>> {
+    // Get all relays for this node
+    let relays = get_relays_conf(pool, node_id).await?;
+
+    // Fetch global and node configs once to avoid redundant queries
+    let global_conf = get_global_tor_conf(pool).await?;
+    let node_conf = get_node_tor_conf(pool, node_id).await?;
+
+    // Resolve configuration for each relay
+    let mut resolved_relays = Vec::new();
+    for relay in relays {
+        // Merge global -> node -> relay configurations
+        let resolved_tor_conf = merge_tor_configs(
+            global_conf.as_ref(),
+            node_conf.as_ref(),
+            relay.tor_conf.as_ref(),
+        );
+
+        resolved_relays.push(ResolvedRelayRecord {
+            id: relay.id,
+            node_id: relay.node_id,
+            cheese_id: relay.cheese_id,
+            name: relay.name,
+            date: relay.date,
+            ip_v4: relay.ip_v4,
+            ip_v6: relay.ip_v6,
+            v4_netmask: relay.v4_netmask,
+            v6_netmask: relay.v6_netmask,
+            resolved_tor_conf,
+        });
+    }
+
+    Ok(resolved_relays)
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::SqlitePool;
@@ -786,7 +833,9 @@ DataDirectory /var/lib/tor
         );
 
         // Create a node
-        let node_id = create_node(&pool, "test_ek_hex", "test_ak_hex").await.unwrap();
+        let node_id = create_node(&pool, "test_ek_hex", "test_ak_hex")
+            .await
+            .unwrap();
 
         // Set node-specific override
         let node_torrc = r#"
@@ -859,13 +908,15 @@ ControlPort 9999
         let node1 = get_or_create_node_by_ek(&pool, ek, ak).await.unwrap();
         assert_eq!(node1.ek_public, ek);
         assert_eq!(node1.ak_public, ak);
-        assert_eq!(node1.enabled, false);  // Should default to disabled
+        assert_eq!(node1.enabled, false); // Should default to disabled
 
         // Second call returns the existing node
-        let node2 = get_or_create_node_by_ek(&pool, ek, "new_ak_hex").await.unwrap();
+        let node2 = get_or_create_node_by_ek(&pool, ek, "new_ak_hex")
+            .await
+            .unwrap();
         assert_eq!(node2.id, node1.id);
         assert_eq!(node2.ek_public, ek);
-        assert_eq!(node2.ak_public, "new_ak_hex");  // AK should be updated
+        assert_eq!(node2.ak_public, "new_ak_hex"); // AK should be updated
 
         Ok(())
     }
@@ -953,7 +1004,9 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_get_relays_conf(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "multi_relay_ek", "multi_relay_ak").await.unwrap();
+        let node_id = create_node(&pool, "multi_relay_ek", "multi_relay_ak")
+            .await
+            .unwrap();
 
         // Create multiple relays for this node
         let (cheese_id_1, _) = allocate_cheese(&pool).await.unwrap();
@@ -1077,7 +1130,9 @@ DataDirectory /var/lib/tor
 
     #[sqlx::test]
     async fn test_node_tor_conf(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "tor_conf_ek", "tor_conf_ak").await.unwrap();
+        let node_id = create_node(&pool, "tor_conf_ek", "tor_conf_ak")
+            .await
+            .unwrap();
 
         let torrc = r#"
 SocksPort 9150
@@ -1100,7 +1155,9 @@ SocksPort 9150
 
     #[sqlx::test]
     async fn test_relay_tor_conf(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "relay_conf_ek", "relay_conf_ak").await.unwrap();
+        let node_id = create_node(&pool, "relay_conf_ek", "relay_conf_ak")
+            .await
+            .unwrap();
         let (cheese_id, _) = allocate_cheese(&pool).await.unwrap();
         let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1", None, None)
             .await
@@ -1142,7 +1199,9 @@ ControlPort 9999
         set_global_node_conf(&pool, &global_conf).await.unwrap();
 
         // Create a node without specific config
-        let node_id = create_node(&pool, "fallback_ek", "fallback_ak").await.unwrap();
+        let node_id = create_node(&pool, "fallback_ek", "fallback_ak")
+            .await
+            .unwrap();
 
         // Should fall back to global config
         let resolved = get_resolved_node_conf(&pool, node_id).await.unwrap();
@@ -1169,7 +1228,9 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_resolved_node_conf_no_config(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "no_conf_ek", "no_conf_ak").await.unwrap();
+        let node_id = create_node(&pool, "no_conf_ek", "no_conf_ak")
+            .await
+            .unwrap();
 
         // Should fail since there's no global or node-specific config
         let result = get_resolved_node_conf(&pool, node_id).await;
@@ -1269,6 +1330,152 @@ RelayBandwidthBurst 150 MB
 
         let ipv6_exit = resolved.directives.get("IPv6Exit").unwrap();
         assert_eq!(ipv6_exit[0].as_bool(), Some(true));
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn test_get_resolved_node_relays_conf(pool: SqlitePool) -> sqlx::Result<()> {
+        // Set up global configuration
+        let global_torrc = r#"
+SocksPort 9050
+ControlPort 9051
+DataDirectory /var/lib/tor
+RelayBandwidthRate 40 MB
+        "#;
+        let global_conf = TorConfigParser::parse(global_torrc).unwrap();
+        set_global_tor_conf(&pool, &global_conf).await.unwrap();
+
+        // Create a node with node-specific configuration
+        let node_id = create_node(&pool, "multi_relay_ek", "multi_relay_ak")
+            .await
+            .unwrap();
+        let node_torrc = r#"
+SocksPort 9150
+AvoidDiskWrites 1
+        "#;
+        let node_conf = TorConfigParser::parse(node_torrc).unwrap();
+        set_node_tor_conf(&pool, node_id, &node_conf).await.unwrap();
+
+        // Create multiple relays with different configurations
+        let (cheese_id_1, name_1) = allocate_cheese(&pool).await.unwrap();
+        let (cheese_id_2, name_2) = allocate_cheese(&pool).await.unwrap();
+        let (cheese_id_3, name_3) = allocate_cheese(&pool).await.unwrap();
+
+        let relay_id_1 = create_relay(&pool, node_id, cheese_id_1, "10.0.0.1", "::1", None, None)
+            .await
+            .unwrap();
+        let relay_id_2 = create_relay(&pool, node_id, cheese_id_2, "10.0.0.2", "::2", None, None)
+            .await
+            .unwrap();
+        let _relay_id_3 = create_relay(&pool, node_id, cheese_id_3, "10.0.0.3", "::3", None, None)
+            .await
+            .unwrap();
+
+        // Set relay-specific configuration for relay 1
+        let relay_torrc_1 = r#"
+ControlPort 10001
+        "#;
+        let relay_conf_1 = TorConfigParser::parse(relay_torrc_1).unwrap();
+        set_relay_tor_conf(&pool, relay_id_1, &relay_conf_1)
+            .await
+            .unwrap();
+
+        // Set relay-specific configuration for relay 2
+        let relay_torrc_2 = r#"
+ControlPort 10002
+RelayBandwidthRate 80 MB
+        "#;
+        let relay_conf_2 = TorConfigParser::parse(relay_torrc_2).unwrap();
+        set_relay_tor_conf(&pool, relay_id_2, &relay_conf_2)
+            .await
+            .unwrap();
+
+        // Relay 3 has no specific configuration
+
+        // Get all resolved relay configurations
+        let resolved = get_resolved_node_relays_conf(&pool, node_id).await.unwrap();
+
+        // Verify we got 3 relays
+        assert_eq!(resolved.len(), 3);
+
+        // Verify relay 1
+        let relay_1 = resolved.iter().find(|r| r.name == name_1).unwrap();
+        assert_eq!(relay_1.ip_v4, "10.0.0.1");
+        assert_eq!(relay_1.ip_v6, "::1");
+        // Should have ControlPort from relay override (10001)
+        let cp1 = relay_1
+            .resolved_tor_conf
+            .directives
+            .get("ControlPort")
+            .unwrap();
+        assert_eq!(cp1[0].as_i64(), Some(10001));
+        // Should have SocksPort from node override (9150)
+        let sp1 = relay_1
+            .resolved_tor_conf
+            .directives
+            .get("SocksPort")
+            .unwrap();
+        assert_eq!(sp1[0].as_i64(), Some(9150));
+        // Should have DataDirectory from global (/var/lib/tor)
+        let dd1 = relay_1
+            .resolved_tor_conf
+            .directives
+            .get("DataDirectory")
+            .unwrap();
+        assert_eq!(dd1[0].as_string(), Some("/var/lib/tor"));
+        // Should have RelayBandwidthRate from global (40 MB)
+        let rbr1 = relay_1
+            .resolved_tor_conf
+            .directives
+            .get("RelayBandwidthRate")
+            .unwrap();
+        assert_eq!(rbr1[0].as_string(), Some("40 MB"));
+
+        // Verify relay 2
+        let relay_2 = resolved.iter().find(|r| r.name == name_2).unwrap();
+        assert_eq!(relay_2.ip_v4, "10.0.0.2");
+        assert_eq!(relay_2.ip_v6, "::2");
+        // Should have ControlPort from relay override (10002)
+        let cp2 = relay_2
+            .resolved_tor_conf
+            .directives
+            .get("ControlPort")
+            .unwrap();
+        assert_eq!(cp2[0].as_i64(), Some(10002));
+        // Should have RelayBandwidthRate from relay override (80 MB)
+        let rbr2 = relay_2
+            .resolved_tor_conf
+            .directives
+            .get("RelayBandwidthRate")
+            .unwrap();
+        assert_eq!(rbr2[0].as_string(), Some("80 MB"));
+
+        // Verify relay 3 (no relay-specific config)
+        let relay_3 = resolved.iter().find(|r| r.name == name_3).unwrap();
+        assert_eq!(relay_3.ip_v4, "10.0.0.3");
+        assert_eq!(relay_3.ip_v6, "::3");
+        // Should have ControlPort from global (9051)
+        let cp3 = relay_3
+            .resolved_tor_conf
+            .directives
+            .get("ControlPort")
+            .unwrap();
+        assert_eq!(cp3[0].as_i64(), Some(9051));
+        // Should have SocksPort from node override (9150)
+        let sp3 = relay_3
+            .resolved_tor_conf
+            .directives
+            .get("SocksPort")
+            .unwrap();
+        assert_eq!(sp3[0].as_i64(), Some(9150));
+        // Should have AvoidDiskWrites from node override (1/true)
+        let adw3 = relay_3
+            .resolved_tor_conf
+            .directives
+            .get("AvoidDiskWrites")
+            .unwrap();
+        assert_eq!(adw3[0].as_bool(), Some(true));
 
         Ok(())
     }
