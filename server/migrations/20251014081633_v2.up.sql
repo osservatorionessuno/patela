@@ -17,10 +17,12 @@ ALTER TABLE relays DROP COLUMN fingerprint;
 DROP TABLE IF EXISTS datas;
 
 -- ==============================================================================
--- STEP 2: Add configuration support to relays
+-- STEP 2: Add configuration support and netmask fields to relays
 -- ==============================================================================
 
 ALTER TABLE relays ADD COLUMN tor_conf TEXT;
+ALTER TABLE relays ADD COLUMN v4_netmask INTEGER NOT NULL DEFAULT 24;
+ALTER TABLE relays ADD COLUMN v6_netmask INTEGER NOT NULL DEFAULT 48;
 
 -- ==============================================================================
 -- STEP 3: Create global configuration table

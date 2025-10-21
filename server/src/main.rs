@@ -323,6 +323,8 @@ async fn get_config_node(
                 cheese_id,
                 ipv4.to_string().as_str(),
                 ipv6.to_string().as_str(),
+                None,
+                None,
             )
             .await
             .map_err(ErrorInternalServerError)?;

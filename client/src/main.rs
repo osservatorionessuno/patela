@@ -269,10 +269,10 @@ async fn cmd_start(
 
             if !addresses.contains(&IpAddr::V4(relay_ipv4)) {
                 println!(
-                    "Adding IPv4 address {} for relay {}",
-                    relay_ipv4, relay.name
+                    "Adding IPv4 address {}/{} for relay {}",
+                    relay_ipv4, relay.v4_netmask, relay.name
                 );
-                let ipv4_network = IpNetwork::new(IpAddr::V4(relay_ipv4), 24)?;
+                let ipv4_network = IpNetwork::new(IpAddr::V4(relay_ipv4), relay.v4_netmask)?;
                 add_network_address(interface_index, ipv4_network, &net_handle).await?;
             } else {
                 println!(
@@ -283,10 +283,10 @@ async fn cmd_start(
 
             if !addresses.contains(&IpAddr::V6(relay_ipv6)) {
                 println!(
-                    "Adding IPv6 address {} for relay {}",
-                    relay_ipv6, relay.name
+                    "Adding IPv6 address {}/{} for relay {}",
+                    relay_ipv6, relay.v6_netmask, relay.name
                 );
-                let ipv6_network = IpNetwork::new(IpAddr::V6(relay_ipv6), 48)?;
+                let ipv6_network = IpNetwork::new(IpAddr::V6(relay_ipv6), relay.v6_netmask)?;
                 add_network_address(interface_index, ipv6_network, &net_handle).await?;
             } else {
                 println!(

@@ -63,6 +63,8 @@ pub struct RelayRecord {
     pub date: String,
     pub ip_v4: String,
     pub ip_v6: String,
+    pub v4_netmask: i64,
+    pub v6_netmask: i64,
     pub tor_conf: Option<TorConfig>,
 }
 
@@ -232,21 +234,29 @@ pub async fn create_relay(
     cheese_id: i64,
     ipv4: &str,
     ipv6: &str,
+    v4_netmask: Option<i64>,
+    v6_netmask: Option<i64>,
 ) -> anyhow::Result<i64> {
     let mut conn = pool.acquire().await?;
 
     let now = &Local::now().to_rfc3339();
 
+    // Use default values if not provided
+    let v4_netmask = v4_netmask.unwrap_or(24);
+    let v6_netmask = v6_netmask.unwrap_or(48);
+
     let id = sqlx::query!(
         r#"
-INSERT INTO relays ( node_id, cheese_id, date, ip_v4, ip_v6 )
-VALUES ( ?1, ?2, ?3, ?4, ?5 )
+INSERT INTO relays ( node_id, cheese_id, date, ip_v4, ip_v6, v4_netmask, v6_netmask )
+VALUES ( ?1, ?2, ?3, ?4, ?5, ?6, ?7 )
         "#,
         node_id,
         cheese_id,
         now,
         ipv4,
-        ipv6
+        ipv6,
+        v4_netmask,
+        v6_netmask
     )
     .execute(&mut *conn)
     .await?
@@ -284,7 +294,8 @@ pub async fn get_relays_conf(pool: &SqlitePool, node_id: i64) -> anyhow::Result<
     let rows = sqlx::query!(
         r#"
 SELECT relays.id, relays.node_id, relays.cheese_id, relays.date,
-       relays.ip_v4, relays.ip_v6, relays.tor_conf, cheeses.name AS name
+       relays.ip_v4, relays.ip_v6, relays.v4_netmask, relays.v6_netmask,
+       relays.tor_conf, cheeses.name AS name
 FROM relays
 INNER JOIN cheeses ON relays.cheese_id = cheeses.id
 WHERE node_id = ?
@@ -310,6 +321,8 @@ WHERE node_id = ?
                 date: row.date,
                 ip_v4: row.ip_v4,
                 ip_v6: row.ip_v6,
+                v4_netmask: row.v4_netmask,
+                v6_netmask: row.v6_netmask,
                 tor_conf,
             }
         })
@@ -786,8 +799,8 @@ SocksPort 9150
         // For this test, we'll manually insert to avoid cheese allocation complexity
         let relay_id = sqlx::query!(
             r#"
-INSERT INTO relays (node_id, cheese_id, date, ip_v4, ip_v6)
-VALUES (?1, 1, '2025-01-01', '192.168.1.1', '::1')
+INSERT INTO relays (node_id, cheese_id, date, ip_v4, ip_v6, v4_netmask, v6_netmask)
+VALUES (?1, 1, '2025-01-01', '192.168.1.1', '::1', 24, 48)
             "#,
             node_id
         )
@@ -891,6 +904,8 @@ ControlPort 9999
             cheese_id_1,
             &ipv4_1.to_string(),
             &ipv6_1.to_string(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -922,7 +937,7 @@ ControlPort 9999
         let node_id = create_node(&pool, "relay_ek", "relay_ak").await.unwrap();
         let (cheese_id, cheese_name) = allocate_cheese(&pool).await.unwrap();
 
-        let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1")
+        let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1", None, None)
             .await
             .unwrap();
         assert!(relay_id > 0);
@@ -944,10 +959,10 @@ ControlPort 9999
         let (cheese_id_1, _) = allocate_cheese(&pool).await.unwrap();
         let (cheese_id_2, _) = allocate_cheese(&pool).await.unwrap();
 
-        create_relay(&pool, node_id, cheese_id_1, "10.0.0.1", "::1")
+        create_relay(&pool, node_id, cheese_id_1, "10.0.0.1", "::1", None, None)
             .await
             .unwrap();
-        create_relay(&pool, node_id, cheese_id_2, "10.0.0.2", "::2")
+        create_relay(&pool, node_id, cheese_id_2, "10.0.0.2", "::2", None, None)
             .await
             .unwrap();
 
@@ -1087,7 +1102,7 @@ SocksPort 9150
     async fn test_relay_tor_conf(pool: SqlitePool) -> sqlx::Result<()> {
         let node_id = create_node(&pool, "relay_conf_ek", "relay_conf_ak").await.unwrap();
         let (cheese_id, _) = allocate_cheese(&pool).await.unwrap();
-        let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1")
+        let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1", None, None)
             .await
             .unwrap();
 
@@ -1197,7 +1212,7 @@ AvoidDiskWrites 0
 
         // Create a relay with relay-specific bandwidth override
         let (cheese_id, _) = allocate_cheese(&pool).await.unwrap();
-        let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1")
+        let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1", None, None)
             .await
             .unwrap();
 
