@@ -1,9 +1,6 @@
 use std::{
-    ffi::CString,
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    os::unix::fs::chown,
-    path::Path,
     process::Command,
     time::Duration,
 };
@@ -11,7 +8,6 @@ use std::{
 use anyhow::Context as AnyhowContext;
 use clap::Parser;
 use clap::clap_derive::Subcommand;
-use etc_passwd::Passwd;
 use ipnetwork::IpNetwork;
 use patela_client::{
     api::{AuthChallenge, AuthRequest, build_client},
@@ -118,6 +114,9 @@ async fn cmd_start(
     let (ek_ecc, ek_public, ak_ecc, ak_public) = load_attestation_keys(context)?;
 
     let client = build_client().await?;
+
+    // Get NV handle, ensuring index is created if not existing
+    let nv_handle = get_nv_index_handle(context)?;
 
     // Get the AK name for the challenge
     let (_ak_pub, ak_name, _qualified_name) = context.read_public(ak_ecc)?;
@@ -357,28 +356,7 @@ async fn cmd_start(
 
     if !is_first_time && !skip_restore {
         println!("Fetch tor keys backup");
-
-        for relay in relays.iter() {
-            // TODO: restore key from the tpm
-
-            let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
-                .join(&relay.name)
-                .join("keys");
-
-            let uid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
-                .unwrap()
-                .uid;
-            let gid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
-                .unwrap()
-                .gid;
-
-            // Fix permissions on keys directory
-            chown(&keys_dir, Some(uid), Some(gid))?;
-
-            for entry in fs::read_dir(&keys_dir)? {
-                chown(entry?.path(), Some(uid), Some(gid))?;
-            }
-        }
+        restore_tor_keys_from_tpm(context, nv_handle, &relays)?;
     }
 
     let systemctl = SystemCtl::default();
@@ -390,13 +368,11 @@ async fn cmd_start(
     }
 
     let wait_seconds = 5;
-    println!("Wait {} seconds before bakup keys", wait_seconds);
+    println!("Wait {} seconds before backup keys", wait_seconds);
 
     tokio::time::sleep(Duration::from_secs(wait_seconds)).await;
 
-    for _relay in relays.iter() {
-        // TODO: backup in tpm
-    }
+    backup_tor_keys_to_tpm(context, nv_handle, &relays)?;
 
     Ok(())
 }

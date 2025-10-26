@@ -1,5 +1,6 @@
 include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
+use crate::tpm::*;
 use aes_gcm::{
     AeadCore, Aes256Gcm, AesGcm, KeyInit,
     aead::{
@@ -11,6 +12,7 @@ use aes_gcm::{
         cipher::typenum::{UInt, UTerm},
     },
 };
+use etc_passwd::Passwd;
 use futures::TryStreamExt;
 use ipnetwork::IpNetwork;
 use nftnl::{
@@ -19,7 +21,7 @@ use nftnl::{
     nft_expr,
     nftnl_sys::libc,
 };
-use patela_server::{HwSpecs, HwSpecsNetwork, Network};
+use patela_server::{HwSpecs, HwSpecsNetwork, Network, db::ResolvedRelayRecord};
 use reqwest::Client;
 use rtnetlink::{
     LinkUnspec, RouteMessageBuilder,
@@ -32,11 +34,16 @@ use rtnetlink::{
 use std::{
     collections::BTreeMap,
     ffi::CStr,
+    ffi::CString,
+    fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::unix::fs::chown,
     path::Path,
 };
 use sysinfo::{Networks, System};
 use tar::{Archive, Builder};
+use tss_esapi::Context as TpmContext;
+use tss_esapi::handles::NvIndexHandle;
 
 pub mod api;
 pub mod tpm;
@@ -544,4 +551,141 @@ pub async fn fetch_aes_key(
     let nonce_array: [u8; 12] = nonce.as_slice().try_into()?;
 
     Ok((cipher, nonce_array))
+}
+
+// Serialization format: <instance-name>\0<key-bytes>\0<instance-name>\0<key-bytes>...
+fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+
+    for relay in relays {
+        let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
+            .join(&relay.name)
+            .join("keys");
+
+        let key_path = keys_dir.join("ed25519_master_id_secret_key");
+        let key_data = fs::read(&key_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read key for relay {}: {}", relay.name, e))?;
+
+        buffer.extend_from_slice(relay.name.as_bytes());
+        buffer.push(0);
+
+        buffer.extend_from_slice(&key_data);
+        buffer.push(0);
+    }
+
+    // Pad to NV_SIZE if needed
+    if buffer.len() > NV_SIZE {
+        anyhow::bail!(
+            "Serialized keys exceed NV_SIZE: {} > {}",
+            buffer.len(),
+            NV_SIZE
+        );
+    }
+    buffer.resize(NV_SIZE, 0);
+
+    Ok(buffer)
+}
+
+fn deserialize_relay_keys(data: &[u8]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+
+    while pos < data.len() {
+        // Skip padding zeros at the end
+        if data[pos] == 0 {
+            break;
+        }
+
+        // Read instance name until null terminator
+        let name_end = data[pos..]
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| anyhow::anyhow!("Missing null terminator for instance name"))?;
+
+        let name = String::from_utf8(data[pos..pos + name_end].to_vec())
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in instance name: {}", e))?;
+        pos += name_end + 1; // Skip null terminator
+
+        if pos >= data.len() {
+            anyhow::bail!("Truncated key data for instance {}", name);
+        }
+
+        // Read key data until null terminator
+        let key_end = data[pos..]
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| anyhow::anyhow!("Missing null terminator for key data"))?;
+
+        let key_data = data[pos..pos + key_end].to_vec();
+        pos += key_end + 1; // Skip null terminator
+
+        result.push((name, key_data));
+    }
+
+    Ok(result)
+}
+
+pub fn backup_tor_keys_to_tpm(
+    ctx: &mut TpmContext,
+    nv_handle: NvIndexHandle,
+    relays: &[ResolvedRelayRecord],
+) -> anyhow::Result<()> {
+    println!("Backing up Tor relay keys to TPM...");
+
+    let serialized = serialize_relay_keys(relays)?;
+    let key_array: [u8; NV_SIZE] = serialized
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Failed to convert to array"))?;
+
+    nv_write_key(ctx, nv_handle, &key_array)?;
+
+    println!("Successfully backed up {} relay keys to TPM", relays.len());
+    Ok(())
+}
+
+pub fn restore_tor_keys_from_tpm(
+    ctx: &mut TpmContext,
+    nv_handle: NvIndexHandle,
+    relays: &[ResolvedRelayRecord],
+) -> anyhow::Result<()> {
+    println!("Restoring Tor relay keys from TPM");
+
+    let data = nv_read_key(ctx, nv_handle)?;
+    let restored_keys = deserialize_relay_keys(&data)?;
+
+    for relay in relays {
+        let key_data = restored_keys
+            .iter()
+            .find(|(name, _)| name == &relay.name)
+            .map(|(_, key)| key)
+            .ok_or_else(|| anyhow::anyhow!("No backup found for relay {}", relay.name))?;
+
+        let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
+            .join(&relay.name)
+            .join("keys");
+
+        fs::create_dir_all(&keys_dir)?;
+
+        let key_path = keys_dir.join("ed25519_master_id_secret_key");
+        fs::write(&key_path, key_data)
+            .map_err(|e| anyhow::anyhow!("Failed to write key for relay {}: {}", relay.name, e))?;
+
+        let uid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
+            .ok_or_else(|| anyhow::anyhow!("User _tor-{} not found", relay.name))?
+            .uid;
+        let gid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
+            .ok_or_else(|| anyhow::anyhow!("Group _tor-{} not found", relay.name))?
+            .gid;
+
+        chown(&keys_dir, Some(uid), Some(gid))?;
+
+        for entry in fs::read_dir(&keys_dir)? {
+            chown(entry?.path(), Some(uid), Some(gid))?;
+        }
+
+        println!("Restored key for relay: {}", relay.name);
+    }
+
+    println!("Successfully restored {} relay keys from TPM", relays.len());
+    Ok(())
 }
