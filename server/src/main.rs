@@ -285,8 +285,8 @@ async fn auth(
         trace!("Size of blob: {}", &blob.to_vec().len());
         trace!("Size of secret: {}", &secret.to_vec().len());
 
-        all_blobs.extend_from_slice(&blob.to_vec());
-        all_secrets.extend_from_slice(&secret.to_vec());
+        all_blobs.extend_from_slice(blob.as_ref());
+        all_secrets.extend_from_slice(secret.as_ref());
     }
 
     let auth_response = AuthChallenge {

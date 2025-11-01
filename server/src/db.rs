@@ -911,7 +911,7 @@ ControlPort 9999
         let (node1, created1) = get_or_create_node_by_ek(&pool, ek, ak).await.unwrap();
         assert_eq!(node1.ek_public, ek);
         assert_eq!(node1.ak_public, ak);
-        assert_eq!(node1.enabled, false); // Should default to disabled
+        assert!(!node1.enabled); // Should default to disabled
         assert!(created1); // Should be newly created
 
         // Second call returns the existing node
