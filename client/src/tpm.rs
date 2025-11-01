@@ -255,8 +255,8 @@ pub fn load_attestation_keys(
     let ak_res = ak::create_ak(
         context,
         ek_ecc,
-        HashingAlgorithm::Sha384,
-        AsymmetricAlgorithmSelection::Ecc(EccCurve::NistP384),
+        HashingAlgorithm::Sha256,
+        AsymmetricAlgorithmSelection::Ecc(EccCurve::NistP256),
         SignatureSchemeAlgorithm::EcDsa,
         None,
         None,
@@ -341,6 +341,60 @@ pub fn resolve_attestation_challenge(
         .context("Failed to flush AK context")?;
 
     Ok(decrypted)
+}
+
+pub fn load_attestation_sessions(
+    context: &mut Context,
+) -> anyhow::Result<(AuthSession, AuthSession)> {
+    let (session_attributes, session_attributes_mask) = SessionAttributesBuilder::new().build();
+
+    let session_1 = context
+        .start_auth_session(
+            None,
+            None,
+            None,
+            SessionType::Hmac,
+            SymmetricDefinition::AES_256_CFB,
+            HashingAlgorithm::Sha256,
+        )
+        .context("Failed to call start_auth_session for HMAC session")?
+        .ok_or_else(|| anyhow::anyhow!("Invalid HMAC session value returned"))?;
+
+    context
+        .tr_sess_set_attributes(session_1, session_attributes, session_attributes_mask)
+        .context("Failed to set attributes for HMAC session")?;
+
+    let session_2 = context
+        .start_auth_session(
+            None,
+            None,
+            None,
+            SessionType::Policy,
+            SymmetricDefinition::AES_256_CFB,
+            HashingAlgorithm::Sha256,
+        )
+        .context("Failed to call start_auth_session for Policy session")?
+        .ok_or_else(|| anyhow::anyhow!("Invalid Policy session value returned"))?;
+
+    context
+        .tr_sess_set_attributes(session_2, session_attributes, session_attributes_mask)
+        .context("Failed to call tr_sess_set_attributes for Policy session")?;
+
+    context
+        .execute_with_session(Some(session_1), |ctx| {
+            let policy_session = PolicySession::try_from(session_2)?;
+            ctx.policy_secret(
+                policy_session,
+                AuthHandle::Endorsement,
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                None,
+            )
+        })
+        .context("Failed to execute policy secret (or convert auth session to policy session)")?;
+
+    Ok((session_1, session_2))
 }
 
 pub fn public_key_to_hex(public: &Public) -> anyhow::Result<String> {

@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context as AnyhowContext;
 use clap::Parser;
 use clap::clap_derive::Subcommand;
 use etc_passwd::Passwd;
@@ -22,6 +23,7 @@ use reqwest::StatusCode;
 use systemctl::SystemCtl;
 use tss_esapi::{
     Context, TctiNameConf,
+    handles::SessionHandle,
     structures::{EncryptedSecret, IdObject},
 };
 
@@ -114,7 +116,7 @@ async fn cmd_start(
     let client = build_client().await?;
 
     // Get the AK name for the challenge
-    let (_ak_pub, _ak_name, _qualified_name) = context.read_public(ak_ecc)?;
+    let (_ak_pub, ak_name, _qualified_name) = context.read_public(ak_ecc)?;
 
     println!("Ask for authentication to the server");
 
@@ -130,6 +132,7 @@ async fn cmd_start(
             .json(&AuthRequest {
                 ek_public: ek_public.clone(),
                 ak_public: ak_public.clone(),
+                ak_name: ak_name.value().to_vec(),
             })
             .send()
             .await?;
@@ -169,18 +172,55 @@ async fn cmd_start(
         }
     };
 
-    // Unmarshal the challenge response
-    let blob = IdObject::try_from(challange_response.blob)?;
-    let secret = EncryptedSecret::try_from(challange_response.secret)?;
+    // Split blob and secret into chunks
+    let mut all_decrypted_data = Vec::new();
 
-    // Resolve the attestation challenge
-    let session_token_digest =
-        resolve_attestation_challenge(context, ek_ecc, ak_ecc, blob, secret)?;
+    let blob_chunks: Vec<&[u8]> = challange_response.blob.chunks(84).collect();
+    let secret_chunks: Vec<&[u8]> = challange_response.secret.chunks(68).collect();
 
-    // Convert Digest to hex string for bearer token
-    let session_token = hex::encode(session_token_digest.as_bytes());
+    if blob_chunks.len() != secret_chunks.len() {
+        anyhow::bail!("Mismatch between blob and secret chunk counts");
+    }
 
-    println!("Successfully authenticated with server");
+    // For some reason is mandatory to create a new auth session every time with the tpm
+    for (blob_chunk, secret_chunk) in blob_chunks.iter().zip(secret_chunks.iter()) {
+        let (session_1, session_2) = load_attestation_sessions(context)?;
+        context.set_sessions((Some(session_1), Some(session_2), None));
+
+        // Unmarshal each block
+        let blob = IdObject::try_from(blob_chunk.to_vec())?;
+        let secret = EncryptedSecret::try_from(secret_chunk.to_vec())?;
+
+        // Resolve the attestation challenge for this block
+        let decrypted_digest = context
+            .activate_credential(ak_ecc, ek_ecc, blob.clone(), secret.clone())
+            .with_context(|| "Failed to activate credential")?;
+
+        all_decrypted_data.extend_from_slice(decrypted_digest.as_bytes());
+
+        context.clear_sessions();
+
+        context
+            .flush_context(SessionHandle::from(session_1).into())
+            .with_context(|| "Failed to clear session")?;
+
+        context
+            .flush_context(SessionHandle::from(session_2).into())
+            .with_context(|| "Failed to clear session")?;
+    }
+
+    context
+        .flush_context(ek_ecc.into())
+        .with_context(|| "Failed to flush EK context")?;
+
+    context
+        .flush_context(ak_ecc.into())
+        .with_context(|| "Failed to flush AK context")?;
+
+    // Convert concatenated decrypted data to hex string for bearer token
+    let session_token = String::from_utf8(all_decrypted_data)?;
+
+    println!("Successfully authenticated!");
 
     // Configuration are send in any case
     let specs = collect_specs()?;

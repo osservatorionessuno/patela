@@ -9,7 +9,7 @@ use actix_web::{
 };
 use rustls::pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
-use tss_esapi::structures::Public;
+use tss_esapi::structures::{Name, Public};
 use tss_esapi::traits::Marshall;
 
 use std::io::Read;
@@ -180,6 +180,7 @@ struct PatelaArgs {
 struct AuthRequest {
     ek_public: Public,
     ak_public: Public,
+    ak_name: Vec<u8>,
 }
 
 /// Long running web server and internal states
@@ -233,10 +234,15 @@ async fn auth(
     let ek_public_hex = hex::encode(&ek_bytes);
     let ak_public_hex = hex::encode(&ak_bytes);
 
+    debug!("Incoming ak public {}", ak_public_hex);
+    debug!("Incoming ek public {}", ak_public_hex);
+
     // Get or create node by EK public key
     let (node, is_created) = get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex)
         .await
         .map_err(ErrorInternalServerError)?;
+
+    info!("Ak and Ek Keys matches node {}", node.id);
 
     // Check if node is enabled (manual approval required)
     if !node.enabled {
@@ -247,11 +253,10 @@ async fn auth(
 
     // Create a biscuit token that will be the session token
     let node_id = node.id;
-    let ek_digest = digest(&ek_bytes);
 
     let authority = biscuit!(
         r#"
-        node({node_id}, {ek_digest});
+        node({node_id});
         "#
     );
 
@@ -260,27 +265,33 @@ async fn auth(
         .map_err(ErrorInternalServerError)?;
 
     // The biscuit token bytes become the challenge
-    let challenge_bytes = token.to_vec().map_err(ErrorInternalServerError)?;
+    let bearer = token.to_base64().map_err(ErrorInternalServerError)?;
 
-    // Get the AK name from the AK public key
-    let ak_name = tss_esapi::structures::Name::try_from(sha2::Sha256::digest(&ak_bytes).to_vec())
+    // Use the AK name from the request
+    let ak_name = Name::try_from(auth_req.ak_name).map_err(ErrorInternalServerError)?;
+
+    // Split challenge into 48-byte blocks and encrypt separately
+    let mut all_blobs = Vec::new();
+    let mut all_secrets = Vec::new();
+
+    for chunk in bearer.as_bytes().chunks(TPM_CREDENTIALS_BLOCK_SIZE) {
+        let (blob, secret) = patela_server::tpm::create_attestation_credentials(
+            auth_req.ek_public.clone(),
+            ak_name.clone(),
+            chunk,
+        )
         .map_err(ErrorInternalServerError)?;
 
-    // Create attestation credentials - encrypt the biscuit token
-    let (blob, secret) = patela_server::tpm::create_attestation_credentials(
-        auth_req.ek_public,
-        ak_name,
-        &challenge_bytes,
-    )
-    .map_err(ErrorInternalServerError)?;
+        trace!("Size of blob: {}", &blob.to_vec().len());
+        trace!("Size of secret: {}", &secret.to_vec().len());
 
-    // Marshal the blob and secret to bytes for JSON serialization
-    let blob_bytes = blob.to_vec();
-    let secret_bytes = secret.to_vec();
+        all_blobs.extend_from_slice(&blob.to_vec());
+        all_secrets.extend_from_slice(&secret.to_vec());
+    }
 
     let auth_response = AuthChallenge {
-        blob: blob_bytes,
-        secret: secret_bytes,
+        blob: all_blobs,
+        secret: all_secrets,
     };
 
     // Return 201 CREATED for new nodes, 200 OK for existing nodes

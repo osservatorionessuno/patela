@@ -12,6 +12,7 @@ const SERVER_TIMEOUT_SEC: u64 = 5;
 pub struct AuthRequest {
     pub ek_public: Public,
     pub ak_public: Public,
+    pub ak_name: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
