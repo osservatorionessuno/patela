@@ -9,18 +9,18 @@ aes = "0.9.0-rc.1"
 aes-gcm = "0.10.3"
 anyhow = "1.0.100"
 base64 = "0.22.1"
-clap = { version = "4.5.49", features = ["derive"] }
-elliptic-curve = { version = "0.14.0-rc.15", features = ["alloc", "pkcs8", "arithmetic", "serde"] }
+clap = { version = "4.5.51", features = ["derive"] }
+elliptic-curve = { version = "0.14.0-rc.16", features = ["alloc", "pkcs8", "arithmetic", "serde"] }
 etc-passwd = "0.2.2"
-flate2 = "1.1.4"
+flate2 = "1.1.5"
 futures = "0.3.31"
 hex = "0.4.3"
 ipnetwork = "0.21"
-mnl = "0.2.2"
+mnl = "0.2.3"
 netlink-packet-core = "0.8"
 netlink-packet-route = "0.25"
 netlink-proto = "0.12"
-nftnl = "0.7.0"
+nftnl = "0.8.0"
 p256 = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
 patela-server = { path = "../server" }
 primefield = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
