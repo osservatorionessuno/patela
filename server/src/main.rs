@@ -193,11 +193,10 @@ async fn node_id_from_request(req: &HttpRequest, pub_key: PublicKey) -> anyhow::
     let credentials = BearerAuth::extract(req).await?;
     let token = Biscuit::from_base64(credentials.token(), pub_key)?;
 
-    let res: Vec<(i64, String)> = token
-        .authorizer()?
-        .query("data($id, $digest) <- node($id, $digest)")?;
+    let mut authorizer = token.authorizer()?;
+    let res: Vec<(i64,)> = authorizer.query("data($id) <- node($id)")?;
 
-    let (node_id, _) = res
+    let (node_id,) = res
         .first()
         .ok_or(anyhow::format_err!("Invalid token content"))?
         .to_owned();

@@ -109,6 +109,12 @@ Test server
 cargo run -p server
 ```
 
+For development this can be useful for logging and reload
+
+```console
+watchexec -w server -r cargo run -p patela-server -- run -vv
+```
+
 TPM emulation for dev, install [swtpm](https://github.com/stefanberger/swtpm)
 
 To access the tpm device without root permission you should add this udev rule

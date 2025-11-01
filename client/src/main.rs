@@ -248,7 +248,7 @@ async fn cmd_start(
 
     // Get tor relay conf
     let relays = client
-        .get(format!("{}/private/relays", server_url))
+        .get(format!("{}/private/config/node", server_url))
         .bearer_auth(&session_token)
         .send()
         .await?
