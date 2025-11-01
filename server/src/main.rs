@@ -7,6 +7,7 @@ use actix_web::{
     rt::net::TcpStream,
     web::{self, Data, Json, Path},
 };
+use rustls::pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 use tss_esapi::structures::Public;
 use tss_esapi::traits::Marshall;
@@ -18,41 +19,40 @@ use biscuit_auth::{Biscuit, PrivateKey, PublicKey, macros::biscuit};
 use clap::{Args, Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 use colored::Colorize;
-use log::info;
+use log::{debug, info, trace};
 use patela_server::{db::*, tor_config::TorConfigParser, *};
-use rustls::{RootCertStore, ServerConfig, pki_types::PrivateKeyDer, server::WebPkiClientVerifier};
-use rustls_pemfile::{certs, pkcs8_private_keys};
-use sha2::Digest as _;
-use sha256::digest;
+use rustls::{
+    ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer},
+};
 use sqlx::SqlitePool;
-use std::{any::Any, fs::File, io::BufReader, path::PathBuf, sync::Arc};
+use std::{any::Any, path::PathBuf};
+
+const TPM_CREDENTIALS_BLOCK_SIZE: usize = 48;
 
 #[derive(Debug, Args, Clone)]
 struct GlobalOpts {
     #[command(flatten)]
     verbose: Verbosity,
     /// use abs path as `sqlite:$PWD/patela.db`
-    #[arg(long, env = "PATELA_DATABASE_URL", default_value = "sqlite:patela.db")]
+    #[arg(long, env = "DATABASE_URL", default_value = "sqlite:patela.db")]
     database_url: String,
 }
 
 #[derive(Debug, Args, Clone)]
 struct CmdRunArgs {
     /// bind local ip
-    #[clap(long, default_value = "0.0.0.0")]
+    #[clap(long, default_value = "127.0.0.1")]
     host: String,
     /// bind port for tls server
     #[clap(long, default_value_t = 8020)]
     port: u16,
-    /// tls authority cert
-    #[clap(long, default_value = "certs/ca-cert.pem")]
-    ca_cert: PathBuf,
-    /// tls server certificate
-    #[clap(long, default_value = "certs/server-cert.pem")]
-    server_cert: PathBuf,
-    /// tls server key
-    #[clap(long, default_value = "certs/server-key.pem")]
-    server_key: PathBuf,
+    /// tls certificate
+    #[clap(long, env = "PATELA_SERVER_CERT")]
+    ssl_cert_file: PathBuf,
+    /// tls key
+    #[clap(long, env = "PATELA_SERVER_KEY")]
+    ssl_key_file: PathBuf,
     /// biscuit private key
     #[clap(long, env = "PATELA_BISCUIT_KEY")]
     biscuit_key: String,
@@ -470,7 +470,6 @@ async fn cmd_run(
     db_pool: SqlitePool,
     host: String,
     port: u16,
-    ca_cert: PathBuf,
     server_cert: PathBuf,
     server_key: PathBuf,
     biscuit_key: String,
@@ -487,32 +486,19 @@ async fn cmd_run(
         .install_default()
         .unwrap();
 
-    let mut cert_store = RootCertStore::empty();
+    // load TLS key/cert files
+    let cert_chain = CertificateDer::pem_file_iter(server_cert)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+        .flatten()
+        .collect();
 
-    // import CA cert
-    let ca_cert = &mut BufReader::new(File::open(ca_cert)?);
-    let ca_cert = certs(ca_cert).collect::<Result<Vec<_>, _>>().unwrap();
+    let key_der = PrivateKeyDer::from_pem_file(server_key)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    for cert in ca_cert {
-        cert_store.add(cert).expect("root CA not added to store");
-    }
-
-    // set up client authentication requirements
-    let client_auth = WebPkiClientVerifier::builder(Arc::new(cert_store))
-        .build()
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key_der)
         .unwrap();
-    let config = ServerConfig::builder().with_client_cert_verifier(client_auth);
-
-    // import server cert and key
-    let cert_file = &mut BufReader::new(File::open(server_cert)?);
-    let key_file = &mut BufReader::new(File::open(server_key)?);
-
-    let cert_chain = certs(cert_file).collect::<Result<Vec<_>, _>>().unwrap();
-    let mut keys = pkcs8_private_keys(key_file)
-        .map(|key| key.map(PrivateKeyDer::Pkcs8))
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let config = config.with_single_cert(cert_chain, keys.remove(0)).unwrap();
 
     HttpServer::new(move || {
         App::new()
@@ -551,9 +537,8 @@ async fn main() -> anyhow::Result<()> {
                 pool,
                 run_conf.host,
                 run_conf.port,
-                run_conf.ca_cert,
-                run_conf.server_cert,
-                run_conf.server_key,
+                run_conf.ssl_cert_file,
+                run_conf.ssl_key_file,
                 run_conf.biscuit_key,
             )
             .await?;
