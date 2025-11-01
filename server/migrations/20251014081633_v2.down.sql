@@ -16,6 +16,7 @@ CREATE TABLE nodes_old (
 );
 
 -- Migrate back existing nodes (this will LOSE TPM authentication data!)
+-- Note: ak_name field is also lost during downgrade
 INSERT INTO nodes_old (id, cert, active, first_seen, last_seen)
 SELECT
     id,

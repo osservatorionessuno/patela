@@ -232,14 +232,21 @@ async fn auth(
 
     let ek_public_hex = hex::encode(&ek_bytes);
     let ak_public_hex = hex::encode(&ak_bytes);
+    let ak_name_hex = hex::encode(&auth_req.ak_name);
 
     debug!("Incoming ak public {}", ak_public_hex);
     debug!("Incoming ek public {}", ak_public_hex);
+    debug!("Incoming ak name {}", ak_name_hex);
 
-    // Get or create node by EK public key
-    let (node, is_created) = get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex)
-        .await
-        .map_err(ErrorInternalServerError)?;
+    // Get or create node by matching all three TPM values (EK, AK public, AK name)
+    let (node, is_created) = get_or_create_node_by_ek(
+        &app.db,
+        &ek_public_hex,
+        &ak_public_hex,
+        &ak_name_hex,
+    )
+    .await
+    .map_err(ErrorInternalServerError)?;
 
     info!("Ak and Ek Keys matches node {}", node.id);
 

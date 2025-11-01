@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_global_conf_id ON global_conf (id);
 -- STEP 4: Migrate nodes table to TPM-based authentication
 -- ==============================================================================
 -- Replace mTLS certificate digest with TPM Endorsement Key (EK) as identity
--- EK public key becomes the immutable hardware-rooted node identity
+-- Node identity is now based on the combination of EK public, AK public, and AK name
 
 -- Create new nodes table with TPM authentication schema
 CREATE TABLE nodes_new (
@@ -49,8 +49,9 @@ CREATE TABLE nodes_new (
     last_seen   TEXT                NOT NULL,           -- ISO 8601 timestamp
     active      INTEGER             NOT NULL DEFAULT 1, -- Boolean: 1=active, 0=inactive
     enabled     INTEGER             NOT NULL DEFAULT 0, -- Boolean: 1=enabled, 0=disabled (manual approval)
-    ek_public   TEXT                NOT NULL UNIQUE,    -- TPM Endorsement Key (hex-encoded)
+    ek_public   TEXT                NOT NULL,           -- TPM Endorsement Key (hex-encoded)
     ak_public   TEXT                NOT NULL,           -- TPM Attestation Key (hex-encoded)
+    ak_name     TEXT                NOT NULL,           -- TPM Attestation Key Name (hex-encoded)
     tor_conf    TEXT,                                   -- Node-specific tor config overrides
     node_conf   TEXT                                    -- Node-specific config
 );
@@ -63,3 +64,7 @@ CREATE TABLE nodes_new (
 -- Replace old table with new schema
 DROP TABLE nodes;
 ALTER TABLE nodes_new RENAME TO nodes;
+
+-- Create a unique index on the combination of ek_public, ak_public, and ak_name
+-- This ensures that a node is uniquely identified by all three TPM values
+CREATE UNIQUE INDEX idx_nodes_tpm_identity ON nodes(ek_public, ak_public, ak_name);
