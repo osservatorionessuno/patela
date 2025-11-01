@@ -29,6 +29,8 @@ use tss_esapi::{
 
 const AUTH_TIMEOUT: u64 = 15; // minutes
 const AUTH_INTERVAL: u64 = 3; // seconds
+const TPM_CREDENTIALS_BLOB_SIZE: usize = 84;
+const TPM_CREDENTIALS_SECRET_SIZE: usize = 68;
 
 #[derive(Subcommand, Debug, Clone)]
 enum NetCommands {
@@ -175,8 +177,14 @@ async fn cmd_start(
     // Split blob and secret into chunks
     let mut all_decrypted_data = Vec::new();
 
-    let blob_chunks: Vec<&[u8]> = challange_response.blob.chunks(84).collect();
-    let secret_chunks: Vec<&[u8]> = challange_response.secret.chunks(68).collect();
+    let blob_chunks: Vec<&[u8]> = challange_response
+        .blob
+        .chunks(TPM_CREDENTIALS_BLOB_SIZE)
+        .collect();
+    let secret_chunks: Vec<&[u8]> = challange_response
+        .secret
+        .chunks(TPM_CREDENTIALS_SECRET_SIZE)
+        .collect();
 
     if blob_chunks.len() != secret_chunks.len() {
         anyhow::bail!("Mismatch between blob and secret chunk counts");
