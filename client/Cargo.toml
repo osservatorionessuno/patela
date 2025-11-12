@@ -21,9 +21,7 @@ netlink-packet-core = "0.8"
 netlink-packet-route = "0.25"
 netlink-proto = "0.12"
 nftnl = "0.8.0"
-p256 = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
 patela-server = { path = "../server" }
-primefield = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 rtnetlink = "0.18"
 rustls-pemfile = "2.2.0"
@@ -33,7 +31,7 @@ sysinfo = { version = "0.37", features = ["serde"] }
 systemctl = "0.5.0"
 tar = "0.4.44"
 tokio = { version = "1.48", features = ["full"] }
-tss-esapi = { git = "https://github.com/baloo/rust-tss-esapi", branch = "baloo/make-credentials", features = ["rustcrypto", "integration-tests", "serde", "abstraction", "p256"] }
+tss-esapi = { git = "https://github.com/gibix/rust-tss-esapi", branch = "baloo/make-credentials", features = ["rustcrypto", "integration-tests", "serde", "abstraction", "p256"] }
 [build-dependencies]
 const-gen = "1.6.8"
 
