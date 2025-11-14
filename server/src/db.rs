@@ -726,15 +726,39 @@ pub async fn get_resolved_relay_conf(
     node_id: i64,
     relay_id: i64,
 ) -> anyhow::Result<TorConfig> {
+    let mut conn = pool.acquire().await?;
+
+    // Fetch the relay name (cheese name) from the database
+    let row = sqlx::query!(
+        r#"
+SELECT cheeses.name AS name
+FROM relays
+INNER JOIN cheeses ON relays.cheese_id = cheeses.id
+WHERE relays.id = ?
+        "#,
+        relay_id
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
     let global_conf = get_global_tor_conf(pool).await?;
     let node_conf = get_node_tor_conf(pool, node_id).await?;
     let relay_conf = get_relay_tor_conf(pool, relay_id).await?;
 
-    Ok(merge_tor_configs(
+    let mut merged = merge_tor_configs(
         global_conf.as_ref(),
         node_conf.as_ref(),
         relay_conf.as_ref(),
-    ))
+    );
+
+    // Append the Nickname directive with the relay's cheese name
+    use crate::tor_config::TorValue;
+    merged.directives.insert(
+        "Nickname".to_string(),
+        vec![TorValue::String(row.name)]
+    );
+
+    Ok(merged)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
