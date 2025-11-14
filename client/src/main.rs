@@ -45,6 +45,8 @@ enum TpmCommands {
     NvWrite,
     Test,
     Attestate,
+    /// Print TPM identity keys (EK, AK, AK Name) for database migration
+    PrintKeys,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -430,8 +432,11 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
             // Get the AK name
             let (_ak_pub, ak_name, _qualified_name) = context.read_public(ak_ecc)?;
 
+            println!("=== TPM Attestation Keys ===");
             println!("EK Public (hex): {}", public_key_to_hex(&ek_public)?);
             println!("AK Public (hex): {}", public_key_to_hex(&ak_public)?);
+            println!("AK Name (hex):   {}", hex::encode(ak_name.value()));
+            println!();
 
             // Create the attestation challenge with real tpm (can be done without TPM context)
             let challenge = b"test challenge data";
@@ -441,6 +446,27 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
 
             println!("Challenge resolved successfully!");
             println!("Result: {}", hex::encode(result.as_bytes()));
+        }
+        TpmCommands::PrintKeys => {
+            let (_ek_ecc, ek_public, _ak_ecc, ak_public) = load_attestation_keys(context)?;
+
+            // Get the AK name
+            let (_ak_pub, ak_name, _qualified_name) = context.read_public(_ak_ecc)?;
+
+            println!("=== TPM Identity Keys for V2 Migration ===");
+            println!();
+            println!("Copy these values to your migration SQL:");
+            println!();
+            println!("ek_public: '{}'", public_key_to_hex(&ek_public)?);
+            println!("ak_public: '{}'", public_key_to_hex(&ak_public)?);
+            println!("ak_name:   '{}'", hex::encode(ak_name.value()));
+            println!();
+            println!("SQL UPDATE example:");
+            println!("UPDATE nodes SET ");
+            println!("  ek_public = '{}',", public_key_to_hex(&ek_public)?);
+            println!("  ak_public = '{}',", public_key_to_hex(&ak_public)?);
+            println!("  ak_name = '{}'", hex::encode(ak_name.value()));
+            println!("WHERE id = 1;");
         }
     }
 
