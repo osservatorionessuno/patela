@@ -1,5 +1,6 @@
 include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
+use crate::tpm::*;
 use aes_gcm::{
     AeadCore, Aes256Gcm, AesGcm, KeyInit,
     aead::{
@@ -11,16 +12,16 @@ use aes_gcm::{
         cipher::typenum::{UInt, UTerm},
     },
 };
+use etc_passwd::Passwd;
 use futures::TryStreamExt;
 use ipnetwork::IpNetwork;
-use lazy_static::lazy_static;
 use nftnl::{
     Batch, Chain, FinalizedBatch, ProtoFamily, Rule, Table,
     expr::{Immediate, Nat, NatType, Register},
     nft_expr,
     nftnl_sys::libc,
 };
-use patela_server::{HwSpecs, HwSpecsNetwork, Network, TorRelayConf};
+use patela_server::{HwSpecs, HwSpecsNetwork, Network, db::ResolvedRelayRecord};
 use reqwest::Client;
 use rtnetlink::{
     LinkUnspec, RouteMessageBuilder,
@@ -33,12 +34,16 @@ use rtnetlink::{
 use std::{
     collections::BTreeMap,
     ffi::CStr,
-    net::{Ipv4Addr, Ipv6Addr},
+    ffi::CString,
+    fs,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::unix::fs::chown,
     path::Path,
 };
 use sysinfo::{Networks, System};
 use tar::{Archive, Builder};
-use tera::Tera;
+use tss_esapi::Context as TpmContext;
+use tss_esapi::handles::NvIndexHandle;
 
 pub mod api;
 pub mod tpm;
@@ -48,18 +53,6 @@ const MANGLE_CHAIN_NAME: &CStr = c"mangle";
 const MANGLE_CHAIN_PRIORITY: i32 = libc::NF_IP_PRI_MANGLE;
 const NAT_CHAIN_NAME: &CStr = c"nat";
 pub const TOR_INSTANCE_LIB_DIR: &str = "/var/lib/tor-instances";
-
-lazy_static! {
-    static ref TEMPLATES: Tera = {
-        let mut tera = Tera::default();
-        if let Err(e) = tera.add_raw_template("torrc", TORRC_TEMLPLATE) {
-            println!("Parsing error(s): {}", e);
-            ::std::process::exit(1);
-        };
-
-        tera
-    };
-}
 
 pub fn collect_specs() -> anyhow::Result<HwSpecs> {
     let sys = System::new_all();
@@ -91,10 +84,56 @@ pub fn collect_specs() -> anyhow::Result<HwSpecs> {
     })
 }
 
-pub fn generate_torrc(conf: &TorRelayConf) -> anyhow::Result<String> {
-    TEMPLATES
-        .render("torrc", &tera::Context::from_serialize(conf)?)
-        .map_err(anyhow::Error::from)
+/// Generate torrc from ResolvedRelayRecord (v2 configuration system)
+pub fn generate_torrc(relay: &patela_server::db::ResolvedRelayRecord) -> anyhow::Result<String> {
+    use std::collections::BTreeMap;
+
+    // Convert TorConfig to torrc format
+    let tor_conf = &relay.resolved_tor_conf;
+    let mut torrc_lines = Vec::new();
+
+    // Add relay name as Nickname first
+    torrc_lines.push(format!("Nickname {}", relay.name));
+    torrc_lines.push(String::new());
+
+    // Sort directives alphabetically for consistent output
+    let sorted_directives: BTreeMap<_, _> = tor_conf.directives.iter().collect();
+
+    // Add all directives from resolved configuration
+    for (key, values) in sorted_directives {
+        for value in values {
+            torrc_lines.push(format!("{} {}", key, value));
+        }
+    }
+
+    Ok(torrc_lines.join("\n"))
+}
+
+// Find network interface by the name
+pub async fn find_network_interface_by_name(
+    handle: &rtnetlink::Handle,
+    target: &String,
+) -> anyhow::Result<u32> {
+    let mut links = handle
+        .link()
+        .get()
+        .set_filter_mask(AddressFamily::Inet, vec![LinkExtentMask::Brvlan])
+        .execute();
+
+    while let Some(msg) = links.try_next().await? {
+        for nla in msg.attributes.into_iter() {
+            match nla {
+                LinkAttribute::IfName(name) => {
+                    if name.eq(target) {
+                        return Ok(msg.header.index);
+                    }
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    anyhow::bail!("No network interface {}", target)
 }
 
 // Find the first ethernet interface without an ip
@@ -196,6 +235,54 @@ pub async fn add_default_route_v6(
     handle.route().add(route).execute().await?;
 
     Ok(())
+}
+
+/// Get all network link
+pub async fn dump_links(handle: &rtnetlink::Handle) -> anyhow::Result<Vec<(u32, String)>> {
+    let mut links = handle
+        .link()
+        .get()
+        .set_filter_mask(AddressFamily::Inet, vec![LinkExtentMask::Brvlan])
+        .execute();
+
+    let mut dump: Vec<(u32, String)> = Vec::new();
+
+    'outer: while let Some(msg) = links.try_next().await? {
+        for nla in msg.attributes.into_iter() {
+            if let LinkAttribute::IfName(name) = nla {
+                println!("found link {} ({})", msg.header.index, name);
+                dump.push((msg.header.index, name));
+                continue 'outer;
+            }
+        }
+        eprintln!("found link {}, but the link has no name", msg.header.index);
+    }
+
+    Ok(dump)
+}
+
+/// Get all network addresses for a link
+pub async fn dump_addresses(
+    handle: &rtnetlink::Handle,
+    link_index: u32,
+) -> anyhow::Result<Vec<IpAddr>> {
+    let mut address_stream = handle
+        .address()
+        .get()
+        .set_link_index_filter(link_index)
+        .execute();
+
+    let mut addresses: Vec<IpAddr> = Vec::new();
+
+    while let Some(msg) = address_stream.try_next().await? {
+        for nla in msg.attributes.iter() {
+            if let AddressAttribute::Address(addr) = nla {
+                addresses.push(*addr);
+            }
+        }
+    }
+
+    Ok(addresses)
 }
 
 pub async fn add_network_address(
@@ -404,7 +491,7 @@ pub async fn generate_aes_cipher_and_store(
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
     // encrypt the aes key with tpm
-    let ciphered_key = tpm::encrypt(tpm_ctx, key.to_vec());
+    let ciphered_key = tpm::encrypt(tpm_ctx, key.to_vec())?;
 
     let _ = client
         .post(format!("{}/private/node/key", server_url))
@@ -457,7 +544,7 @@ pub async fn fetch_aes_key(
         .into();
 
     // decrypt aes key with tpm
-    let key = tpm::decrypt(tpm_ctx, ciphered_key.into());
+    let key = tpm::decrypt(tpm_ctx, ciphered_key.into())?;
 
     let cipher = Aes256Gcm::new(key.as_slice().into());
 
@@ -466,73 +553,139 @@ pub async fn fetch_aes_key(
     Ok((cipher, nonce_array))
 }
 
-#[cfg(test)]
-mod tests {
-    use patela_server::{TorPolicy, TorPolicyVerb};
+// Serialization format: <instance-name>\0<key-bytes>\0<instance-name>\0<key-bytes>...
+fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Vec<u8>> {
+    let mut buffer = Vec::new();
 
-    use super::*;
+    for relay in relays {
+        let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
+            .join(&relay.name)
+            .join("keys");
 
-    const TORRC_EXAMPLE: &'static str = "
-Nickname miaomiao
+        let key_path = keys_dir.join("ed25519_master_id_secret_key");
+        let key_data = fs::read(&key_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read key for relay {}: {}", relay.name, e))?;
 
-ORPort 0.0.0.0:9001
-ORPort [0.0.0.0]:9001
+        buffer.extend_from_slice(relay.name.as_bytes());
+        buffer.push(0);
 
-RelayBandwidthRate 10 MB
-RelayBandwidthBurst 100 MB
-
-ContactInfo email:info[]osservatorionessuno.org url:https://osservatorionessuno.org proof:uri-rsa abuse:exit[]osservatorionessuno.org mastodon:https://mastodon.cisti.org/@0n_odv donationurl:https://osservatorionessuno.org/participate/ ciissversion:2
-
-MyFamily one two three
-
-ExitPolicy reject 0.0.0.0/8:*
-ExitPolicy reject 169.254.0.0/16:*
-ExitPolicy reject 10.0.0.0/8:*
-ExitPolicy reject *:25
-ExitPolicy accept *:*
-
-ExitRelay 1
-IPv6Exit 1
-";
-
-    #[test]
-    fn test_generate_torrc() {
-        let tor_conf = TorRelayConf {
-            name: String::from("miaomiao"),
-            family: String::from("one two three"),
-            or_address_v4: String::from("0.0.0.0"),
-            or_address_v6: String::from("0.0.0.0"),
-            or_port: 9001,
-            bandwidth_rate: 10,
-            bandwidth_burst: 100,
-            policy: vec![
-                TorPolicy {
-                    verb: TorPolicyVerb::Reject,
-                    object: String::from("0.0.0.0/8:*"),
-                },
-                TorPolicy {
-                    verb: TorPolicyVerb::Reject,
-                    object: String::from("169.254.0.0/16:*"),
-                },
-                TorPolicy {
-                    verb: TorPolicyVerb::Reject,
-                    object: String::from("10.0.0.0/8:*"),
-                },
-                TorPolicy {
-                    verb: TorPolicyVerb::Reject,
-                    object: String::from("*:25"),
-                },
-                TorPolicy {
-                    verb: TorPolicyVerb::Accept,
-                    object: String::from("*:*"),
-                },
-            ],
-        };
-
-        let res = generate_torrc(&tor_conf).unwrap();
-
-        println!("{}", res);
-
-        assert_eq!(res, TORRC_EXAMPLE);
+        buffer.extend_from_slice(&key_data);
+        buffer.push(0);
     }
+
+    // Pad to NV_SIZE if needed
+    if buffer.len() > NV_SIZE {
+        anyhow::bail!(
+            "Serialized keys exceed NV_SIZE: {} > {}",
+            buffer.len(),
+            NV_SIZE
+        );
+    }
+    buffer.resize(NV_SIZE, 0);
+
+    Ok(buffer)
+}
+
+fn deserialize_relay_keys(data: &[u8]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+
+    while pos < data.len() {
+        // Skip padding zeros at the end
+        if data[pos] == 0 {
+            break;
+        }
+
+        // Read instance name until null terminator
+        let name_end = data[pos..]
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| anyhow::anyhow!("Missing null terminator for instance name"))?;
+
+        let name = String::from_utf8(data[pos..pos + name_end].to_vec())
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in instance name: {}", e))?;
+        pos += name_end + 1; // Skip null terminator
+
+        if pos >= data.len() {
+            anyhow::bail!("Truncated key data for instance {}", name);
+        }
+
+        // Read key data until null terminator
+        let key_end = data[pos..]
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| anyhow::anyhow!("Missing null terminator for key data"))?;
+
+        let key_data = data[pos..pos + key_end].to_vec();
+        pos += key_end + 1; // Skip null terminator
+
+        result.push((name, key_data));
+    }
+
+    Ok(result)
+}
+
+pub fn backup_tor_keys_to_tpm(
+    ctx: &mut TpmContext,
+    nv_handle: NvIndexHandle,
+    relays: &[ResolvedRelayRecord],
+) -> anyhow::Result<()> {
+    println!("Backing up Tor relay keys to TPM...");
+
+    let serialized = serialize_relay_keys(relays)?;
+    let key_array: [u8; NV_SIZE] = serialized
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Failed to convert to array"))?;
+
+    nv_write_key(ctx, nv_handle, &key_array)?;
+
+    println!("Successfully backed up {} relay keys to TPM", relays.len());
+    Ok(())
+}
+
+pub fn restore_tor_keys_from_tpm(
+    ctx: &mut TpmContext,
+    nv_handle: NvIndexHandle,
+    relays: &[ResolvedRelayRecord],
+) -> anyhow::Result<()> {
+    println!("Restoring Tor relay keys from TPM");
+
+    let data = nv_read_key(ctx, nv_handle)?;
+    let restored_keys = deserialize_relay_keys(&data)?;
+
+    for relay in relays {
+        let key_data = restored_keys
+            .iter()
+            .find(|(name, _)| name == &relay.name)
+            .map(|(_, key)| key)
+            .ok_or_else(|| anyhow::anyhow!("No backup found for relay {}", relay.name))?;
+
+        let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
+            .join(&relay.name)
+            .join("keys");
+
+        fs::create_dir_all(&keys_dir)?;
+
+        let key_path = keys_dir.join("ed25519_master_id_secret_key");
+        fs::write(&key_path, key_data)
+            .map_err(|e| anyhow::anyhow!("Failed to write key for relay {}: {}", relay.name, e))?;
+
+        let uid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
+            .ok_or_else(|| anyhow::anyhow!("User _tor-{} not found", relay.name))?
+            .uid;
+        let gid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
+            .ok_or_else(|| anyhow::anyhow!("Group _tor-{} not found", relay.name))?
+            .gid;
+
+        chown(&keys_dir, Some(uid), Some(gid))?;
+
+        for entry in fs::read_dir(&keys_dir)? {
+            chown(entry?.path(), Some(uid), Some(gid))?;
+        }
+
+        println!("Restored key for relay: {}", relay.name);
+    }
+
+    println!("Successfully restored {} relay keys from TPM", relays.len());
+    Ok(())
 }

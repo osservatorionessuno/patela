@@ -109,6 +109,12 @@ Test server
 cargo run -p server
 ```
 
+For development this can be useful for logging and reload
+
+```console
+watchexec -w server -r cargo run -p patela-server -- run -vv
+```
+
 TPM emulation for dev, install [swtpm](https://github.com/stefanberger/swtpm)
 
 To access the tpm device without root permission you should add this udev rule
@@ -138,7 +144,7 @@ first setup
 
 ```console
 /usr/share/swtpm/swtpm-create-user-config-files
-mkdir -p ${XDG_CONFIG_HOME}/patela1
+mkdir -p ${XDG_CONFIG_HOME}/patelatpm
 swtpm_setup --tpm2 --tpmstate ${XDG_CONFIG_HOME}/patelatpm \
    --create-ek-cert --create-platform-cert --lock-nvram
 ```
@@ -180,36 +186,18 @@ repo](https://github.com/actix/examples/tree/08f3bd3ce45b16aedd52961d6658373922d
 For the client we have to hardcode the autority and the certificate at compile
 time, look into `client/build.rs` if you want the code.
 
-Ok let's start by generating the keys
+## TODO
 
-```console
-mkdir certs
-openssl req -new -x509 -nodes -days 365 \
-   -key certs/ca-key.pem \
-   -out certs/ca-cert.pem
+```
+mkcert -install localhost 127.0.0.1 ::1
 ```
 
-server keys and certs, please note that you have to embed you server name or ip
-
-```console
-openssl x509 -req -days 365 -set_serial 01 \
-   -in certs/server-req.pem \
-   -out certs/server-cert.pem \
-   -CA certs/ca-cert.pem \
-   -CAkey certs/ca-key.pem
-
-openssl x509 -req -days 365 -set_serial 01 \
-   -in certs/server-req.pem \
-   -out certs/server-cert.pem \
-   -CA certs/ca-cert.pem \
-   -CAkey certs/ca-key.pem \
-   -CAcreateserial -extfile <(printf "subjectAltName=DNS:patela.lol,DNS:localhost,IP:127.0.0.1,IP:::1\n")
+```
+mkcert -CAROOT localhost 127.0.0.1 ::1
 ```
 
-For generate client certificates use the script in `misc/client-cert.sh`
-
-```console
-./misc/client-cert.sh apu-1
+```
+biscuit keypair
 ```
 
 ## TPM
@@ -251,7 +239,7 @@ laptop and run in a debian bookworm vm. The two glibc are incompatible but with
 zig you need just to run:
 
 ```console
-cargo zigbuild --target x86_64-unknown-linux-gnu.2.36`
+cargo zigbuild --target x86_64-unknown-linux-gnu.2.36
 ```
 
 To test with qemu/libvirt you can start with a virsh example in
