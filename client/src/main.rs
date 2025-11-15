@@ -58,6 +58,8 @@ enum Commands {
         skip_net: bool,
         #[arg(long, action, help = "Do not try to restore long term keys")]
         skip_restore: bool,
+        #[arg(long, env = "PATELA_INSECURE", action, help = "Skip TLS certificate validation (insecure)")]
+        insecure: bool,
     },
     /// Mainly for development and basic maintenances
     Tpm {
@@ -91,7 +93,8 @@ async fn main() -> anyhow::Result<()> {
             server,
             skip_net,
             skip_restore,
-        } => cmd_start(server, config.tpm2, skip_net, skip_restore).await,
+            insecure,
+        } => cmd_start(server, config.tpm2, skip_net, skip_restore, insecure).await,
         Commands::Tpm { cmd } => cmd_tpm(cmd, config.tpm2).await,
         Commands::Net { cmd } => cmd_net(cmd).await,
     }
@@ -103,6 +106,7 @@ async fn cmd_start(
     tpm2: Option<String>,
     skip_net: bool,
     skip_restore: bool,
+    insecure: bool,
 ) -> anyhow::Result<()> {
     let tpm_device_name = match tpm2 {
         Some(device) => TctiNameConf::Device(device.parse()?),
@@ -115,7 +119,11 @@ async fn cmd_start(
 
     let (ek_ecc, ek_public, ak_ecc, ak_public) = load_attestation_keys(context)?;
 
-    let client = build_client().await?;
+    if insecure {
+        println!("WARNING: Running in insecure mode - TLS certificate validation is disabled!");
+    }
+
+    let client = build_client(insecure).await?;
 
     // Get NV handle, ensuring index is created if not existing
     let nv_handle = get_nv_index_handle(context)?;
