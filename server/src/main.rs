@@ -104,6 +104,18 @@ impl std::str::FromStr for InputSource {
     }
 }
 
+#[derive(Subcommand, Clone, Debug)]
+enum CmdConfNodeScope {
+    /// Global default configuration
+    Default,
+    /// Node-specific configuration override
+    Node {
+        /// Node ID
+        #[arg(long)]
+        id: i64,
+    },
+}
+
 #[derive(Debug, Subcommand, Clone)]
 enum CmdConfVerb {
     /// Parse a torrc file and set configuration at different scopes
@@ -114,6 +126,24 @@ enum CmdConfVerb {
         /// Configuration scope
         #[command(subcommand)]
         scope: CmdVerbScope,
+    },
+    /// Import NodeConfig from JSON file
+    ImportNodeConf {
+        /// Input file, `-` for stdin
+        #[arg()]
+        input: InputSource,
+        /// Configuration scope
+        #[command(subcommand)]
+        scope: CmdConfNodeScope,
+    },
+    /// Get NodeConfig
+    GetNodeConf {
+        /// Configuration scope
+        #[command(subcommand)]
+        scope: CmdConfNodeScope,
+        /// Json format
+        #[arg(short, long)]
+        json: bool,
     },
     /// Configure a configuration
     Set {
@@ -665,6 +695,65 @@ async fn main() -> anyhow::Result<()> {
                             relay_id.to_string().yellow()
                         );
                     }
+                }
+            }
+            CmdConfVerb::ImportNodeConf { input, scope } => {
+                // Read input from file or stdin
+                let content = match input {
+                    InputSource::Stdin => {
+                        let mut buffer = String::new();
+                        std::io::stdin().read_to_string(&mut buffer)?;
+                        buffer
+                    }
+                    InputSource::File(path) => std::fs::read_to_string(path)?,
+                };
+
+                // Parse JSON configuration
+                let node_conf: patela_server::NodeConfig = serde_json::from_str(&content)?;
+
+                match scope {
+                    CmdConfNodeScope::Default => {
+                        set_global_node_conf(&pool, &node_conf).await?;
+                        println!(
+                            "{} {}",
+                            "✓".green().bold(),
+                            "Global default node configuration imported successfully".green()
+                        );
+                    }
+                    CmdConfNodeScope::Node { id } => {
+                        set_node_node_conf(&pool, id, &node_conf).await?;
+                        println!(
+                            "{} Node {} node configuration imported successfully",
+                            "✓".green().bold(),
+                            id.to_string().cyan()
+                        );
+                    }
+                }
+            }
+            CmdConfVerb::GetNodeConf { scope, json } => {
+                let conf = match scope {
+                    CmdConfNodeScope::Default => get_global_node_conf(&pool).await?,
+                    CmdConfNodeScope::Node { id } => get_node_conf(&pool, id).await?,
+                };
+
+                match conf {
+                    Some(c) => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&c)?);
+                        } else {
+                            // Pretty print node configuration
+                            println!("{}", "Network Configuration:".bright_yellow().bold());
+                            println!("  {} {}", "IPv4 Gateway:".bright_blue(), c.network.ipv4_gateway.white());
+                            println!("  {} {}", "IPv6 Gateway:".bright_blue(), c.network.ipv6_gateway.white());
+                            if let Some(dns) = &c.network.dns_server {
+                                println!("  {} {}", "DNS Server:".bright_blue(), dns.white());
+                            }
+                            if let Some(iface) = &c.network.interface_name {
+                                println!("  {} {}", "Interface Name:".bright_blue(), iface.white());
+                            }
+                        }
+                    }
+                    None => println!("{} {}", "ℹ".blue(), "No node configuration found".yellow()),
                 }
             }
             CmdConfVerb::Get { scope, json } => {
