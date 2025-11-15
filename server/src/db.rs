@@ -108,37 +108,39 @@ pub async fn get_or_create_node_by_ek(
 ) -> anyhow::Result<(NodeRecord, bool)> {
     let mut conn = pool.acquire().await?;
 
-    // Try to find existing node by matching all three TPM values
+    // Try to find existing node by matching only ek_public
     let existing = sqlx::query_as!(
         NodeRecord,
         r#"
 SELECT id, first_seen, last_seen, enabled as "enabled: bool", ek_public, ak_public, ak_name
 FROM nodes
-WHERE ek_public = ?1 AND ak_public = ?2 AND ak_name = ?3
+WHERE ek_public = ?1
         "#,
-        ek_public,
-        ak_public,
-        ak_name
+        ek_public
     )
     .fetch_optional(&mut *conn)
     .await?;
 
     if let Some(mut node) = existing {
-        // Update last_seen
+        // Update last_seen and ak values (they may change across boots)
         let now = Local::now().to_rfc3339();
         sqlx::query!(
             r#"
 UPDATE nodes
-SET last_seen = ?1
-WHERE id = ?2
+SET last_seen = ?1, ak_public = ?2, ak_name = ?3
+WHERE id = ?4
             "#,
             now,
+            ak_public,
+            ak_name,
             node.id
         )
         .execute(&mut *conn)
         .await?;
 
         node.last_seen = now;
+        node.ak_public = ak_public.to_string();
+        node.ak_name = ak_name.to_string();
         Ok((node, false)) // Existing node, not created
     } else {
         // Create new node with ek_public, ak_public, and ak_name
@@ -958,14 +960,23 @@ ControlPort 9999
         assert_eq!(node2.ak_name, ak_name);
         assert!(!created2); // Should not be newly created
 
-        // Call with different ak_name creates a new node (different identity)
+        // Call with different ak_name but same ek_public returns the same node (identity is ek_public only)
         let different_ak_name = "different_ak_name_hex";
         let (node3, created3) = get_or_create_node_by_ek(&pool, ek, ak, different_ak_name)
             .await
             .unwrap();
-        assert_ne!(node3.id, node1.id); // Different node ID
-        assert_eq!(node3.ak_name, different_ak_name);
-        assert!(created3); // Should be newly created
+        assert_eq!(node3.id, node1.id); // Same node ID (matched on ek_public)
+        assert_eq!(node3.ak_name, different_ak_name); // ak_name should be updated
+        assert!(!created3); // Should not be newly created
+
+        // Call with different ek_public creates a new node
+        let different_ek = "different_ek_hex";
+        let (node4, created4) = get_or_create_node_by_ek(&pool, different_ek, ak, ak_name)
+            .await
+            .unwrap();
+        assert_ne!(node4.id, node1.id); // Different node ID
+        assert_eq!(node4.ek_public, different_ek);
+        assert!(created4); // Should be newly created
 
         Ok(())
     }
