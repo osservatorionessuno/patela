@@ -28,7 +28,7 @@ use rustls::{
 use sqlx::SqlitePool;
 use std::{any::Any, path::PathBuf};
 
-const TPM_CREDENTIALS_BLOCK_SIZE: usize = 48;
+const TPM_CREDENTIALS_BLOCK_SIZE: usize = 20;
 
 #[derive(Debug, Args, Clone)]
 struct GlobalOpts {
@@ -235,18 +235,13 @@ async fn auth(
     let ak_name_hex = hex::encode(&auth_req.ak_name);
 
     debug!("Incoming ak public {}", ak_public_hex);
-    debug!("Incoming ek public {}", ak_public_hex);
+    debug!("Incoming ek public {}", ek_public_hex);
     debug!("Incoming ak name {}", ak_name_hex);
 
     // Get or create node by matching all three TPM values (EK, AK public, AK name)
-    let (node, is_created) = get_or_create_node_by_ek(
-        &app.db,
-        &ek_public_hex,
-        &ak_public_hex,
-        &ak_name_hex,
-    )
-    .await
-    .map_err(ErrorInternalServerError)?;
+    let (node, _) = get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex, &ak_name_hex)
+        .await
+        .map_err(ErrorInternalServerError)?;
 
     info!("Ak and Ek Keys matches node {}", node.id);
 
@@ -300,12 +295,7 @@ async fn auth(
         secret: all_secrets,
     };
 
-    // Return 201 CREATED for new nodes, 200 OK for existing nodes
-    if is_created {
-        Ok(HttpResponse::Created().json(auth_response))
-    } else {
-        Ok(HttpResponse::Ok().json(auth_response))
-    }
+    Ok(HttpResponse::Ok().json(auth_response))
 }
 
 #[get("/config/node")]
@@ -524,6 +514,7 @@ async fn cmd_run(
             .service(
                 web::scope("/private")
                     .wrap(HttpAuthentication::bearer(ok_validator))
+                    .service(get_config_node)
                     .service(get_config_resolved_node)
                     .service(get_config_resolved_relay)
                     .service(post_specs),

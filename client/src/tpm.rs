@@ -288,7 +288,7 @@ pub fn resolve_attestation_challenge(
             None,
             None,
             SessionType::Hmac,
-            SymmetricDefinition::AES_256_CFB,
+            SymmetricDefinition::AES_128_CFB,
             HashingAlgorithm::Sha256,
         )
         .context("Failed to call start_auth_session for HMAC session")?
@@ -304,7 +304,7 @@ pub fn resolve_attestation_challenge(
             None,
             None,
             SessionType::Policy,
-            SymmetricDefinition::AES_256_CFB,
+            SymmetricDefinition::AES_128_CFB,
             HashingAlgorithm::Sha256,
         )
         .context("Failed to call start_auth_session for Policy session")?
@@ -354,7 +354,7 @@ pub fn load_attestation_sessions(
             None,
             None,
             SessionType::Hmac,
-            SymmetricDefinition::AES_256_CFB,
+            SymmetricDefinition::AES_128_CFB,
             HashingAlgorithm::Sha256,
         )
         .context("Failed to call start_auth_session for HMAC session")?
@@ -370,7 +370,7 @@ pub fn load_attestation_sessions(
             None,
             None,
             SessionType::Policy,
-            SymmetricDefinition::AES_256_CFB,
+            SymmetricDefinition::AES_128_CFB,
             HashingAlgorithm::Sha256,
         )
         .context("Failed to call start_auth_session for Policy session")?

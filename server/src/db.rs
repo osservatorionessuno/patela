@@ -755,10 +755,9 @@ WHERE relays.id = ?
 
     // Append the Nickname directive with the relay's cheese name
     use crate::tor_config::TorValue;
-    merged.directives.insert(
-        "Nickname".to_string(),
-        vec![TorValue::String(row.name)]
-    );
+    merged
+        .directives
+        .insert("Nickname".to_string(), vec![TorValue::String(row.name)]);
 
     Ok(merged)
 }
@@ -921,9 +920,15 @@ ControlPort 9999
     #[sqlx::test]
     async fn test_get_nodes(pool: SqlitePool) -> sqlx::Result<()> {
         // Create multiple nodes
-        let _ = create_node(&pool, "ek1", "ak1", "ek1_name_hex").await.unwrap();
-        let _ = create_node(&pool, "ek2", "ak2", "ek2_name_hex").await.unwrap();
-        let _ = create_node(&pool, "ek3", "ak3", "ek3_name_hex").await.unwrap();
+        let _ = create_node(&pool, "ek1", "ak1", "ek1_name_hex")
+            .await
+            .unwrap();
+        let _ = create_node(&pool, "ek2", "ak2", "ek2_name_hex")
+            .await
+            .unwrap();
+        let _ = create_node(&pool, "ek3", "ak3", "ek3_name_hex")
+            .await
+            .unwrap();
 
         let nodes = get_nodes(&pool).await.unwrap();
         assert_eq!(nodes.len(), 3);
@@ -1007,7 +1012,9 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_find_ips_incremental(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "test_ek", "test_ak", "test_ek_name_hex").await.unwrap();
+        let node_id = create_node(&pool, "test_ek", "test_ak", "test_ek_name_hex")
+            .await
+            .unwrap();
 
         // Get first IPs
         let (ipv4_1, ipv6_1) = find_next_ips(&pool).await.unwrap();
@@ -1048,7 +1055,9 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_create_and_get_relay(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "relay_ek", "relay_ak", "relay_ek_name_hex").await.unwrap();
+        let node_id = create_node(&pool, "relay_ek", "relay_ak", "relay_ek_name_hex")
+            .await
+            .unwrap();
         let (cheese_id, cheese_name) = allocate_cheese(&pool).await.unwrap();
 
         let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1", None, None)
@@ -1067,9 +1076,14 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_get_relays_conf(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "multi_relay_ek", "multi_relay_ak", "multi_relay_ek_name_hex")
-            .await
-            .unwrap();
+        let node_id = create_node(
+            &pool,
+            "multi_relay_ek",
+            "multi_relay_ak",
+            "multi_relay_ek_name_hex",
+        )
+        .await
+        .unwrap();
 
         // Create multiple relays for this node
         let (cheese_id_1, _) = allocate_cheese(&pool).await.unwrap();
@@ -1092,7 +1106,9 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_node_specs(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "spec_ek", "spec_ak", "spec_ek_name_hex").await.unwrap();
+        let node_id = create_node(&pool, "spec_ek", "spec_ak", "spec_ek_name_hex")
+            .await
+            .unwrap();
 
         let specs = HwSpecs {
             memory: 16_000_000_000,
@@ -1142,7 +1158,9 @@ ControlPort 9999
 
     #[sqlx::test]
     async fn test_node_node_conf(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "conf_ek", "conf_ak", "conf_ek_name_hex").await.unwrap();
+        let node_id = create_node(&pool, "conf_ek", "conf_ak", "conf_ek_name_hex")
+            .await
+            .unwrap();
 
         let conf = NodeConfig {
             network: NetworkConf {
@@ -1220,9 +1238,14 @@ SocksPort 9150
 
     #[sqlx::test]
     async fn test_relay_tor_conf(pool: SqlitePool) -> sqlx::Result<()> {
-        let node_id = create_node(&pool, "relay_conf_ek", "relay_conf_ak", "relay_conf_ek_name_hex")
-            .await
-            .unwrap();
+        let node_id = create_node(
+            &pool,
+            "relay_conf_ek",
+            "relay_conf_ak",
+            "relay_conf_ek_name_hex",
+        )
+        .await
+        .unwrap();
         let (cheese_id, _) = allocate_cheese(&pool).await.unwrap();
         let relay_id = create_relay(&pool, node_id, cheese_id, "10.0.0.1", "::1", None, None)
             .await
@@ -1331,7 +1354,9 @@ IPv6Exit 1
         set_global_tor_conf(&pool, &global_conf).await.unwrap();
 
         // Create a node with node-specific override (disable AvoidDiskWrites)
-        let node_id = create_node(&pool, "test_ek", "test_ak", "test_ek_name_hex").await.unwrap();
+        let node_id = create_node(&pool, "test_ek", "test_ak", "test_ek_name_hex")
+            .await
+            .unwrap();
         let node_torrc = r#"
 AvoidDiskWrites 0
         "#;
@@ -1414,9 +1439,14 @@ RelayBandwidthRate 40 MB
         set_global_tor_conf(&pool, &global_conf).await.unwrap();
 
         // Create a node with node-specific configuration
-        let node_id = create_node(&pool, "multi_relay_ek", "multi_relay_ak", "multi_relay_ek_name_hex")
-            .await
-            .unwrap();
+        let node_id = create_node(
+            &pool,
+            "multi_relay_ek",
+            "multi_relay_ak",
+            "multi_relay_ek_name_hex",
+        )
+        .await
+        .unwrap();
         let node_torrc = r#"
 SocksPort 9150
 AvoidDiskWrites 1

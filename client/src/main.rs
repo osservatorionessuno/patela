@@ -25,7 +25,7 @@ use tss_esapi::{
 
 const AUTH_TIMEOUT: u64 = 15; // minutes
 const AUTH_INTERVAL: u64 = 3; // seconds
-const TPM_CREDENTIALS_BLOB_SIZE: usize = 84;
+const TPM_CREDENTIALS_BLOB_SIZE: usize = 56;
 const TPM_CREDENTIALS_SECRET_SIZE: usize = 68;
 
 #[derive(Subcommand, Debug, Clone)]
@@ -411,7 +411,7 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
         }
         TpmCommands::NvWrite => {
             let plain_text = "A".repeat(NV_SIZE);
-            let array_ref: &[u8; 480] = plain_text.as_bytes().try_into().unwrap();
+            let array_ref: &[u8; NV_SIZE] = plain_text.as_bytes().try_into().unwrap();
             let nv_index_handle = get_nv_index_handle(context).unwrap();
             nv_write_key(context, nv_index_handle, array_ref).unwrap();
 
