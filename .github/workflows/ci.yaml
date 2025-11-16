@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  RUSTFLAGS: "-Dwarnings"
+  DATABASE_URL: "sqlite:patela.db"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    container: debian:13-slim
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y \
+          libtss2-dev \
+          libmnl-dev \
+          libnftnl-dev \
+          curl \
+          build-essential \
+          pkg-config \
+          git \
+          ca-certificates
+      - name: Setup rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Cargo fmt
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+      - name: Install sqlx-cli
+        uses: actions-rs/cargo@v1
+        with:
+          command: install 
+          args: sqlx-cli --no-default-features --features sqlite
+      - name: Prepare DB
+        run: |
+          cargo sqlx database create
+          cargo sqlx database setup --source server/migrations 
+      - name: Clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-targets --all-features
+
+  build:
+    runs-on: ubuntu-latest
+    container: debian:13-slim
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y \
+          libtss2-dev \
+          libmnl-dev \
+          libnftnl-dev \
+          curl \
+          build-essential \
+          pkg-config \
+          git \
+          ca-certificates
+      - name: Setup rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy   
+      - name: Install sqlx-cli
+        uses: actions-rs/cargo@v1
+        with:
+          command: install 
+          args: sqlx-cli --no-default-features --features sqlite
+      - name: Prepare DB
+        run: |
+          cargo sqlx database create
+          cargo sqlx database setup --source server/migrations 
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
