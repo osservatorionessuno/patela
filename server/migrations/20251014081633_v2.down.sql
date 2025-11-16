@@ -8,7 +8,6 @@
 CREATE TABLE nodes_old (
     id          INTEGER PRIMARY KEY NOT NULL,
     cert        VARCHAR(64)         NOT NULL UNIQUE,    -- SHA256 digest of client certificate
-    active      INTEGER             NOT NULL DEFAULT 1,
     first_seen  TEXT                NOT NULL,
     last_login  TEXT,
     aes_key     BLOB                DEFAULT NULL,
@@ -17,11 +16,10 @@ CREATE TABLE nodes_old (
 
 -- Migrate back existing nodes (this will LOSE TPM authentication data!)
 -- Note: ak_name field is also lost during downgrade
-INSERT INTO nodes_old (id, cert, active, first_seen, last_login)
+INSERT INTO nodes_old (id, cert, first_seen, last_login)
 SELECT
     id,
     substr(ek_public, 1, 64),  -- Use EK hash as cert placeholder
-    active,
     first_seen,
     last_login
 FROM nodes;
