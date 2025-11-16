@@ -13,6 +13,20 @@ configuration manager that relies on tpm for identity and crypto operation.
 - [biscuit](https://www.biscuitsec.org/): session token
 - [sqlx](https://github.com/launchbadge/sqlx): simple sql library
 
+## Core concepts
+
+- **Client identity**: Each client is uniquely identified by its TPM's
+  Endorsement Key (EK), while the Attestation Key (AK) is generated dynamically
+  on every run.
+- **Remote attestation as authentication**: The server encrypts a bearer token
+  specifically for the client's TPM. If the client successfully decrypts it, we
+  can assume it's running on the expected TPM hardware.
+- **Idempotent runs**: The client can safely re-run enrollment on an
+  already-configured node without breaking existing setups, enabling dynamic
+  upgrades.
+- **Data persistence**: Tor long-term keys are stored in the TPM's non-volatile
+  memory, eliminating the need for remote backups.
+
 ## Main flow
 
 ### Boot
@@ -53,8 +67,10 @@ Transparency](https://docs.system-transparency.org/st-1.0.0/).
 
 The flow is identical to first run, except:
 
-1. `server`: recognizes existing node from TPM keys (returns 200 OK instead of 201 CREATED)
-2. `server`: returns existing relay configurations instead of allocating new ones
+1. `server`: recognizes existing node from TPM keys (returns 200 OK instead of
+   201 CREATED)
+2. `server`: returns existing relay configurations instead of allocating new
+   ones
 3. `client`: restores Tor keys from TPM NV storage (not from remote backup)
 
 ### Architecture Diagram
@@ -141,38 +157,68 @@ sequenceDiagram
     Note over Client,TPM: Client restores keys from TPM NV<br/>Same configuration flow
 ```
 
-## Future work and design
-
 ### Remote attestation
 
-V2 implements TPM-based remote attestation using the `make_credential` / `activate_credential` challenge-response protocol:
+V2 implements TPM-based remote attestation using the `make_credential` /
+`activate_credential` challenge-response protocol:
 
 **How it works**:
+
 1. Client loads EK (Endorsement Key) and AK (Attestation Key) from TPM
 2. Client sends public keys to server
-3. Server creates a challenge encrypted to the specific TPM using `make_credential`
+3. Server creates a challenge encrypted to the specific TPM using
+   `make_credential`
 4. Only the TPM with the matching EK can decrypt via `activate_credential`
 5. This proves the client possesses the specific TPM hardware
 
 **Security properties**:
+
 - Node identity is bound to TPM hardware (EK + AK + AK Name)
 - Cannot be cloned without physical TPM access
 - No shared secrets or certificates to steal
 - Manual administrator approval required for new nodes (`enabled` flag)
 
-**Comparison to V1**: V1 used hardcoded client certificates which could be stolen. V2's TPM attestation provides hardware-bound identity that cannot be extracted from the client binary.
+**Comparison to V1**: V1 used hardcoded client certificates which could be
+stolen. V2's TPM attestation provides hardware-bound identity that cannot be
+extracted from the client binary.
 
 ## Getting started
 
-To get tpm and sqlite working is good to configure a couple of variables
+To get tpm and sqlite working is good to configure the environment file
 
 ```console
-export DATABASE_URL="sqlite:$PWD/patela.db"
+mv example.env .env
 ```
+
+Generate the server certificate, add the network address or domain if you are running on a different machine
+
+```
+mkcert -install localhost 127.0.0.1 ::1
+```
+
+Locate authority certificate
+
+```
+mkcert -CAROOT localhost 127.0.0.1 ::1
+```
+
+Generate a biscuit keypair and copy the private key `Private key: ed25519-private/<text to copy>`
+
+```
+biscuit keypair
+```
+
+Setup a local database
 
 ```console
 cargo sqlx database setup --source server/migrations
 cargo run -p client
+```
+
+Check the variable configuration and export the environment
+
+```console
+set +a && source .env && set -a
 ```
 
 Test server
@@ -246,11 +292,13 @@ Here are free words, both for documentation and for future blog post
 V2 uses TPM-based attestation instead of mTLS certificates for node identity:
 
 **Node Identity**: Combination of three TPM values:
+
 - Endorsement Key (EK) public part
 - Attestation Key (AK) public part
 - AK Name (cryptographic name of the AK)
 
 **Authentication Flow**:
+
 1. Client loads EK and AK from TPM
 2. Client sends public keys to server (`POST /public/auth`)
 3. Server matches node by `(ek_public, ak_public, ak_name)` triple
@@ -259,23 +307,11 @@ V2 uses TPM-based attestation instead of mTLS certificates for node identity:
 6. Client uses `activate_credential` to decrypt (only possible with the correct TPM)
 7. Decrypted token becomes the session bearer token
 
-**TLS**: Server still uses TLS (server-side certificate only), but client authentication happens via TPM attestation, not client certificates.
+**TLS**: Server still uses TLS (server-side certificate only), but client
+authentication happens via TPM attestation, not client certificates.
 
-**Manual Approval**: New nodes are created with `enabled=0` and require admin approval via `patela enable <node_id>` before they can authenticate.
-
-## TODO
-
-```
-mkcert -install localhost 127.0.0.1 ::1
-```
-
-```
-mkcert -CAROOT localhost 127.0.0.1 ::1
-```
-
-```
-biscuit keypair
-```
+**Manual Approval**: New nodes are created with `enabled=0` and require admin
+approval via `patela enable <node_id>` before they can authenticate.
 
 ## TPM
 
@@ -283,9 +319,9 @@ Is not trivial to deal with the tpm2 interface, fortunatly the example of the
 rust bindings are really well documented, all the patela's code is just a
 rework of two example:
 
-1.  [certify](https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/examples/certify.rs)
+- [certify](https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/examples/certify.rs)
     for attestation and enrollment with the server
-2.  [symmetric file encrypt
+. [symmetric file encrypt
     decrypt](https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/examples/symmetric_file_encrypt_decrypt.rs)
     to encrypt the relay's keys for remote backup
 
