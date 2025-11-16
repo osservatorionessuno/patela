@@ -5,16 +5,6 @@ configuration manager that relies on tpm for identity and crypto operation.
 
 **Patela** is the [piedmont](https://en.wikipedia.org/wiki/Piedmont) word for kick.
 
-> [!WARNING]
-> We are not part of [Rust Evangelism Strike
-> Force](https://enet4.github.io/rust-tropes/rust-evangelism-strike-force/),
-> the motivation for writing this in rust are:
->
-> - Easy to create a multi-binary application and cross-compile to different
->   architectures
-> - Arti (new tor) is in rust and in future we want to deal with their rpc
->   interface squotting the official data structures
-
 ## Main components
 
 - [actix-web](https://actix.rs): web server
@@ -36,37 +26,122 @@ Transparency](https://docs.system-transparency.org/st-1.0.0/).
 3. dhcp mgmt interface
 4. fetch linux main stage image from server
 
-### First run
+### First run (V2 - TPM Attestation)
 
-1. `client`: generate primary key in the TPM
-2. `client`: generate AES-GCM keys
-3. `both`: initiate mTLS authentication/connection
-4. `server`: authenticate using the public part of the TPM primary key
-5. `database`: store node information
-6. `server`: generate a bearer token (containing node information) for session
-   authentication with Biscuit
-7. `client`: send AES-GCM keys encrypted with the TPM
-8. `database`: store encrypted keys
-9. `client`: report hardware resources (CPU cores, clock speed, memory, etc.)
-10. `server`: generate Tor and network configurations
-11. `database`: store relay information and allocate resources (hostnames, IPs)
-12. `client`: apply network configuration (IP binding)
-13. `client`: create Tor instances
-14. `client`: generate Tor configurations
-15. `client`: start relay services
-16. `client`: create an archive for each relay containing its keys
-17. `client`: encrypt backups and send them to the server
-18. `database`: store encrypted backups
+1. `client`: load TPM Endorsement Key (EK) and Attestation Key (AK)
+2. `client`: send authentication request with EK public, AK public, and AK name
+3. `server`: create or retrieve node by matching TPM keys (EK + AK + AK name)
+4. `server`: check if node is manually enabled by administrator
+5. `server`: create TPM attestation challenge using make_credential
+6. `server`: encrypt Biscuit session token with TPM challenge
+7. `client`: activate credential using TPM to decrypt the challenge
+8. `client`: extract bearer token from decrypted challenge response
+9. `client`: report hardware resources (CPU cores, memory, etc.)
+10. `server`: calculate relay count based on specs (min of cores, memory/1GB)
+11. `server`: allocate IPs and cheese names for relays
+12. `server`: build configuration hierarchy (global → node → relay)
+13. `database`: store relay information with allocated resources
+14. `client`: fetch relay configurations with resolved Tor settings
+15. `client`: create Tor relay instances (users and directories)
+16. `client`: apply network configuration (IP binding via rtnetlink)
+17. `client`: configure UID-based source routing (nftables SNAT)
+18. `client`: generate torrc files from templates with relay-specific settings
+19. `client`: start Tor relay systemd services
+20. `client`: store Tor keys in TPM NV index (no remote backup in V2)
 
-### Second run
+### Subsequent runs
 
-The only differences are:
+The flow is identical to first run, except:
 
-1. `client`: fetch primary key from tpm's persistent storage handler
-2. `client`: fetch aes-gcm keys backup and decrypt with tpm
-3. `client`: fetch relays key backup and unarchive in the correct place
+1. `server`: recognizes existing node from TPM keys (returns 200 OK instead of 201 CREATED)
+2. `server`: returns existing relay configurations instead of allocating new ones
+3. `client`: restores Tor keys from TPM NV storage (not from remote backup)
 
-### Schema
+### Architecture Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant TPM
+    participant Server
+    participant Database
+
+    Note over Client,Database: Boot Phase (stboot)
+    Client->>Client: Boot from USB/iPXE
+    Client->>Client: stboot hardware validation
+    Client->>Client: DHCP on mgmt interface
+    Client->>Server: Fetch Linux main stage image
+
+    Note over Client,Database: First Run: TPM Attestation & Authentication
+    Client->>TPM: Load EK and AK keys
+    TPM-->>Client: EK public, AK public, AK name
+
+    Client->>Server: POST /public/auth<br/>{ek_public, ak_public, ak_name}
+    Server->>Database: get_or_create_node_by_ek()
+    Database-->>Server: node (enabled=0 for new nodes)
+
+    alt Node not enabled
+        Server-->>Client: 401 Unauthorized<br/>"Node not yet enabled"
+        Note over Client: Poll every 3s for 15min<br/>until admin runs: patela enable <node_id>
+    end
+
+    Server->>TPM: make_credential(AK, challenge_secret)
+    Note over Server: challenge_secret = Biscuit bearer token
+    TPM-->>Server: {blob, encrypted_secret}
+
+    alt First boot
+        Server-->>Client: 201 CREATED + {blob, secret}
+    else Subsequent boot
+        Server-->>Client: 200 OK + {blob, secret}
+    end
+
+    Client->>TPM: activate_credential(AK, EK, blob, secret)
+    TPM-->>Client: Decrypted bearer token
+
+    Note over Client,Database: Hardware Specs & Relay Allocation
+    Client->>Client: Collect hardware specs<br/>(CPU cores, memory, network)
+    Client->>Server: POST /private/specs + bearer token<br/>{n_cpus, memory, cpu_name}
+    Server->>Server: Calculate relay_count<br/>min(memory/1GB, n_cpus)
+    Server->>Database: Allocate cheese names<br/>Allocate IPs (incremental)
+    Server->>Database: Create relay records
+    Database-->>Server: Success
+    Server-->>Client: 200 OK
+
+    Note over Client,Database: Configuration & Deployment
+    Client->>Server: GET /private/config/node + bearer token
+    Server->>Database: Fetch global_conf, node.tor_conf, relay.tor_conf
+    Server->>Server: Resolve configuration hierarchy<br/>(global → node → relay)
+    Server-->>Client: Array of ResolvedRelayRecord<br/>{name, ip_v4, ip_v6, or_port, dir_port, torrc}
+
+    loop For each relay
+        Client->>Client: Create system user _tor-{name}
+        Client->>Client: Create /etc/tor/instances/{name}/
+        Client->>Client: Generate torrc from template
+    end
+
+    Client->>Server: GET /private/config/resolved/node + bearer token
+    Server-->>Client: NodeConfig {network: {gateway_v4, gateway_v6, dns}}
+
+    Client->>Client: Find network interface (starts with 'e', no IP)
+    loop For each relay
+        Client->>Client: rtnetlink: Add IP to interface
+        Client->>Client: nftables: SNAT by relay UID<br/>owner match → mark → source IP
+    end
+
+    loop For each relay
+        Client->>Client: systemctl start tor@{name}
+    end
+
+    Client->>TPM: Store Tor relay keys in NV index
+    Note over Client,TPM: V2: No remote backup,<br/>keys stay in TPM only
+
+    Note over Client,Database: Subsequent Boots
+    Note over Server,Database: Server returns 200 OK (not 201)<br/>Returns existing relay configs<br/>No new IP/name allocation
+    Note over Client,TPM: Client restores keys from TPM NV<br/>Same configuration flow
+```
+
+### Database Schema
 
 ![](./misc/schema.svg)
 
@@ -74,21 +149,22 @@ The only differences are:
 
 ### Remote attestation
 
-Would be interesting to remote attestate the hardware with a challange resolved
-by the tpm. There are many good example, also from the [official
-library](https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/examples/certify.rs).
-The main idea is that a tpm can **prove** to have a secret and this can be used
-to validate the first client enrollment. After the attestation the server can
-sign client's certificate with the authority key and go for regular mTLS from
-there. The problem is just that is a bit triky to deal with persistent objects
-in the tpm, but we'll do!
+V2 implements TPM-based remote attestation using the `make_credential` / `activate_credential` challenge-response protocol:
 
-By now the "workaround" to this limit is to hardcode a client-specific
-certificate in the binary already signed by the autority, the certificate can
-be stolen but for our thread model is not a big deal because with a valid
-certificate you can just ask for new configuration or get the relay keys. If
-you try to steal a relay identity the valid relay start to complain and would
-be easy to get notified and blacklist the node from the network.
+**How it works**:
+1. Client loads EK (Endorsement Key) and AK (Attestation Key) from TPM
+2. Client sends public keys to server
+3. Server creates a challenge encrypted to the specific TPM using `make_credential`
+4. Only the TPM with the matching EK can decrypt via `activate_credential`
+5. This proves the client possesses the specific TPM hardware
+
+**Security properties**:
+- Node identity is bound to TPM hardware (EK + AK + AK Name)
+- Cannot be cloned without physical TPM access
+- No shared secrets or certificates to steal
+- Manual administrator approval required for new nodes (`enabled` flag)
+
+**Comparison to V1**: V1 used hardcoded client certificates which could be stolen. V2's TPM attestation provides hardware-bound identity that cannot be extracted from the client binary.
 
 ## Getting started
 
@@ -169,22 +245,27 @@ export TPM2TOOLS_TCTI="swtpm:host=localhost,port=2321"
 
 Here are free words, both for documentation and for future blog post
 
-### Mtls
+### Authentication (V2)
 
-MTLS is not a complex, you need the autority and the keys, in the server we
-have to integrate in actix web, in the client reqwest seems to have a good
-support.
+V2 uses TPM-based attestation instead of mTLS certificates for node identity:
 
-- an autority
-- client certificate signed by the autority
-- server certificate signed by the autority
-- client ssl keys are read at compile time
+**Node Identity**: Combination of three TPM values:
+- Endorsement Key (EK) public part
+- Attestation Key (AK) public part
+- AK Name (cryptographic name of the AK)
 
-For the server there is good example in the [actix-web
-repo](https://github.com/actix/examples/tree/08f3bd3ce45b16aedd52961d6658373922da831b/https-tls/rustls-client-cert).
+**Authentication Flow**:
+1. Client loads EK and AK from TPM
+2. Client sends public keys to server (`POST /public/auth`)
+3. Server matches node by `(ek_public, ak_public, ak_name)` triple
+4. Server creates attestation challenge using `make_credential`
+5. Server encrypts Biscuit bearer token as challenge secret
+6. Client uses `activate_credential` to decrypt (only possible with the correct TPM)
+7. Decrypted token becomes the session bearer token
 
-For the client we have to hardcode the autority and the certificate at compile
-time, look into `client/build.rs` if you want the code.
+**TLS**: Server still uses TLS (server-side certificate only), but client authentication happens via TPM attestation, not client certificates.
+
+**Manual Approval**: New nodes are created with `enabled=0` and require admin approval via `patela enable <node_id>` before they can authenticate.
 
 ## TODO
 
