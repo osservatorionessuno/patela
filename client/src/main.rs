@@ -371,7 +371,7 @@ async fn cmd_start(
 
     if !is_first_time && !skip_restore {
         println!("Fetch tor keys backup");
-        restore_tor_keys_from_tpm(context, nv_handle, &relays)?;
+        restore_tor_keys_from_tpm(context, nv_handle, nv_size, &relays)?;
     }
 
     let systemctl = SystemCtl::default();
@@ -387,7 +387,7 @@ async fn cmd_start(
 
     tokio::time::sleep(Duration::from_secs(wait_seconds)).await;
 
-    backup_tor_keys_to_tpm(context, nv_handle, &relays)?;
+    backup_tor_keys_to_tpm(context, nv_handle, nv_size, &relays)?;
 
     Ok(())
 }
