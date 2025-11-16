@@ -252,9 +252,10 @@ async fn auth(
     debug!("Incoming ak name {}", ak_name_hex);
 
     // Get or create node by matching all three TPM values (EK, AK public, AK name)
-    let (node, created) = get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex, &ak_name_hex)
-        .await
-        .map_err(ErrorInternalServerError)?;
+    let (node, created) =
+        get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex, &ak_name_hex)
+            .await
+            .map_err(ErrorInternalServerError)?;
 
     if created {
         info!("Created new node {}", node.id);
