@@ -1,5 +1,5 @@
 use actix_web::{
-    App, FromRequest, HttpRequest, HttpResponse, HttpServer, Responder,
+    App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder,
     dev::ServiceRequest,
     error::{ErrorInternalServerError, ErrorNotFound, ErrorUnauthorized},
     get, middleware, post,
@@ -13,7 +13,7 @@ use tss_esapi::traits::Marshall;
 use std::io::Read;
 
 use actix_web_httpauth::{extractors::bearer::BearerAuth, middleware::HttpAuthentication};
-use biscuit_auth::{Biscuit, PrivateKey, PublicKey, macros::biscuit};
+use biscuit_auth::{Biscuit, PrivateKey, macros::biscuit};
 use clap::{Args, Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 use colored::Colorize;
@@ -217,21 +217,6 @@ struct PatelaServer {
     biscuit_root: biscuit_auth::KeyPair,
 }
 
-async fn node_id_from_request(req: &HttpRequest, pub_key: PublicKey) -> anyhow::Result<i64> {
-    let credentials = BearerAuth::extract(req).await?;
-    let token = Biscuit::from_base64(credentials.token(), pub_key)?;
-
-    let mut authorizer = token.authorizer()?;
-    let res: Vec<(i64,)> = authorizer.query("data($id) <- node($id)")?;
-
-    let (node_id,) = res
-        .first()
-        .ok_or(anyhow::format_err!("Invalid token content"))?
-        .to_owned();
-
-    Ok(node_id)
-}
-
 // Node creation is now handled by the /auth endpoint via TPM attestation
 
 #[derive(Debug, Clone, Serialize)]
@@ -331,9 +316,11 @@ async fn get_config_node(
     app: Data<PatelaServer>,
     req: HttpRequest,
 ) -> actix_web::Result<impl Responder> {
-    let node_id = node_id_from_request(&req, app.biscuit_root.public())
-        .await
-        .map_err(ErrorNotFound)?;
+    let node_id = req
+        .extensions()
+        .get::<i64>()
+        .copied()
+        .ok_or_else(|| ErrorUnauthorized("node_id not found in request"))?;
 
     // look for relays already created
     let mut tor_relays = get_resolved_node_relays_conf(&app.db, node_id)
@@ -389,9 +376,11 @@ async fn get_config_resolved_node(
     app: Data<PatelaServer>,
     req: HttpRequest,
 ) -> actix_web::Result<impl Responder> {
-    let node_id = node_id_from_request(&req, app.biscuit_root.public())
-        .await
-        .map_err(ErrorNotFound)?;
+    let node_id = req
+        .extensions()
+        .get::<i64>()
+        .copied()
+        .ok_or_else(|| ErrorUnauthorized("node_id not found in request"))?;
 
     Ok(Json(
         get_resolved_node_conf(&app.db, node_id)
@@ -406,9 +395,11 @@ async fn post_specs(
     req: HttpRequest,
     body: Json<HwSpecs>,
 ) -> actix_web::Result<impl Responder> {
-    let node_id = node_id_from_request(&req, app.biscuit_root.public())
-        .await
-        .map_err(ErrorNotFound)?;
+    let node_id = req
+        .extensions()
+        .get::<i64>()
+        .copied()
+        .ok_or_else(|| ErrorUnauthorized("node_id not found in request"))?;
 
     let spec_id = create_node_spec(&app.db, node_id, &body.into_inner())
         .await
@@ -423,9 +414,11 @@ async fn get_config_resolved_relay(
     path: Path<String>,
     req: HttpRequest,
 ) -> actix_web::Result<impl Responder> {
-    let node_id = node_id_from_request(&req, app.biscuit_root.public())
-        .await
-        .map_err(ErrorNotFound)?;
+    let node_id = req
+        .extensions()
+        .get::<i64>()
+        .copied()
+        .ok_or_else(|| ErrorUnauthorized("node_id not found in request"))?;
 
     let relay_name = path.into_inner();
     let relay_id = get_relay_by_name(&app.db, node_id, &relay_name)
@@ -445,9 +438,29 @@ async fn ok_validator(
 ) -> Result<ServiceRequest, (actix_web::Error, ServiceRequest)> {
     let app = req.app_data::<Data<PatelaServer>>().unwrap();
 
-    if Biscuit::from_base64(credentials.token(), app.biscuit_root.public()).is_err() {
-        return Err((ErrorUnauthorized("bearer parse error"), req));
-    }
+    let token = match Biscuit::from_base64(credentials.token(), app.biscuit_root.public()) {
+        Ok(t) => t,
+        Err(_) => return Err((ErrorUnauthorized("bearer parse error"), req)),
+    };
+
+    // Extract node_id from the biscuit token
+    let mut authorizer = match token.authorizer() {
+        Ok(a) => a,
+        Err(_) => return Err((ErrorUnauthorized("authorizer creation failed"), req)),
+    };
+
+    let res: Vec<(i64,)> = match authorizer.query("data($id) <- node($id)") {
+        Ok(r) => r,
+        Err(_) => return Err((ErrorUnauthorized("invalid token content"), req)),
+    };
+
+    let node_id = match res.first() {
+        Some((id,)) => *id,
+        None => return Err((ErrorUnauthorized("no node id in token"), req)),
+    };
+
+    // Insert node_id into request extensions for use by handlers
+    req.extensions_mut().insert(node_id);
 
     Ok(req)
 }
