@@ -141,10 +141,6 @@ sequenceDiagram
     Note over Client,TPM: Client restores keys from TPM NV<br/>Same configuration flow
 ```
 
-### Database Schema
-
-![](./misc/schema.svg)
-
 ## Future work and design
 
 ### Remote attestation
