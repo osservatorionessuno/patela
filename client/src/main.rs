@@ -131,7 +131,7 @@ async fn cmd_start(
     let client = build_client(insecure).await?;
 
     // Get NV handle, ensuring index is created if not existing
-    let nv_handle = get_nv_index_handle(context)?;
+    let (nv_handle, nv_size) = get_nv_index_handle(context)?;
 
     // Get the AK name for the challenge
     let (_ak_pub, ak_name, _qualified_name) = context.read_public(ak_ecc)?;
@@ -423,16 +423,17 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
             );
         }
         TpmCommands::NvWrite => {
-            let plain_text = "A".repeat(NV_SIZE);
-            let array_ref: &[u8; NV_SIZE] = plain_text.as_bytes().try_into().unwrap();
-            let nv_index_handle = get_nv_index_handle(context).unwrap();
-            nv_write_key(context, nv_index_handle, array_ref).unwrap();
+            let (nv_index_handle, size) = get_nv_index_handle(context).unwrap();
+            let plain_text = "A".repeat(size);
+            let bytes: Vec<u8> = plain_text.as_bytes().into();
+
+            nv_write_data(context, nv_index_handle, &bytes).unwrap();
 
             println!("=== Data successfully written to TPM NV ===");
         }
         TpmCommands::NvRead => {
-            let nv_index_handle = get_nv_index_handle(context).unwrap();
-            let bytes = nv_read_key(context, nv_index_handle).unwrap();
+            let (nv_index_handle, _size) = get_nv_index_handle(context).unwrap();
+            let bytes = nv_read_data(context, nv_index_handle).unwrap();
             let text = std::str::from_utf8(&bytes).unwrap();
             println!("=== {} read from TPM NV ===", text);
         }
