@@ -252,11 +252,15 @@ async fn auth(
     debug!("Incoming ak name {}", ak_name_hex);
 
     // Get or create node by matching all three TPM values (EK, AK public, AK name)
-    let (node, _) = get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex, &ak_name_hex)
+    let (node, created) = get_or_create_node_by_ek(&app.db, &ek_public_hex, &ak_public_hex, &ak_name_hex)
         .await
         .map_err(ErrorInternalServerError)?;
 
-    info!("Ak and Ek Keys matches node {}", node.id);
+    if created {
+        info!("Created new node {}", node.id);
+    } else {
+        info!("Ak and Ek Keys matches existing node {}", node.id);
+    }
 
     // Check if node is enabled (manual approval required)
     if !node.enabled {
@@ -308,7 +312,12 @@ async fn auth(
         secret: all_secrets,
     };
 
-    Ok(HttpResponse::Ok().json(auth_response))
+    // Return 201 Created for new nodes, 200 OK for existing nodes
+    if created {
+        Ok(HttpResponse::Created().json(auth_response))
+    } else {
+        Ok(HttpResponse::Ok().json(auth_response))
+    }
 }
 
 #[get("/config/node")]
@@ -459,8 +468,18 @@ async fn ok_validator(
         None => return Err((ErrorUnauthorized("no node id in token"), req)),
     };
 
-    // Insert node_id into request extensions for use by handlers
+    // Update last_login and check if this is first authentication
+    let is_first_auth = match update_last_login(&app.db, node_id).await {
+        Ok(first) => first,
+        Err(e) => {
+            log::error!("Failed to update last_login for node {}: {}", node_id, e);
+            return Err((ErrorInternalServerError("database error"), req));
+        }
+    };
+
+    // Insert node_id and first_auth flag into request extensions for use by handlers
     req.extensions_mut().insert(node_id);
+    req.extensions_mut().insert(is_first_auth);
 
     Ok(req)
 }
@@ -617,8 +636,11 @@ async fn main() -> anyhow::Result<()> {
                 );
                 println!(
                     "  {} {}",
-                    "Last seen:  ".bright_black(),
-                    node.last_seen.green()
+                    "Last login: ".bright_black(),
+                    node.last_login
+                        .as_ref()
+                        .map(|s| s.green().to_string())
+                        .unwrap_or_else(|| "never".bright_black().to_string())
                 );
 
                 let status_text = if node.enabled {

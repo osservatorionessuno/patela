@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS nodes
     cert        VARCHAR(64)	    NOT NULL UNIQUE,    -- Sha256 digest of the public key
     active      INTEGER             NOT NULL DEFAULT 1, -- Default active
     first_seen  TEXT                NOT NULL,           -- Date in ISO 8601 format
-    last_seen   TEXT                NOT NULL,            -- Date in ISO 8601 format
+    last_login  TEXT,                                   -- Date in ISO 8601 format (NULL until first auth)
     aes_key     BLOB                DEFAULT NULL,
     aes_nonce   BLOB                DEFAULT NULL
 );

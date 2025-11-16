@@ -46,7 +46,7 @@ CREATE INDEX IF NOT EXISTS idx_global_conf_id ON global_conf (id);
 CREATE TABLE nodes_new (
     id          INTEGER PRIMARY KEY NOT NULL,
     first_seen  TEXT                NOT NULL,           -- ISO 8601 timestamp
-    last_seen   TEXT                NOT NULL,           -- ISO 8601 timestamp
+    last_login  TEXT,                                   -- ISO 8601 timestamp (NULL until first auth)
     active      INTEGER             NOT NULL DEFAULT 1, -- Boolean: 1=active, 0=inactive
     enabled     INTEGER             NOT NULL DEFAULT 0, -- Boolean: 1=enabled, 0=disabled (manual approval)
     ek_public   TEXT                NOT NULL,           -- TPM Endorsement Key (hex-encoded)

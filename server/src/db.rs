@@ -35,7 +35,7 @@ lazy_static! {
 pub struct NodeRecord {
     pub id: i64,
     pub first_seen: String,
-    pub last_seen: String,
+    pub last_login: Option<String>,
     pub enabled: bool,
     pub ek_public: String,
     pub ak_public: String,
@@ -70,13 +70,12 @@ pub async fn create_node(
 
     let id = sqlx::query!(
         r#"
-INSERT INTO nodes ( ek_public, ak_public, ak_name, first_seen, last_seen )
-VALUES ( ?1, ?2, ?3, ?4, ?5 )
+INSERT INTO nodes ( ek_public, ak_public, ak_name, first_seen, last_login )
+VALUES ( ?1, ?2, ?3, ?4, NULL )
         "#,
         ek_public,
         ak_public,
         ak_name,
-        now,
         now
     )
     .execute(&mut *conn)
@@ -92,7 +91,7 @@ pub async fn get_nodes(pool: &SqlitePool) -> anyhow::Result<Vec<NodeRecord>> {
     let res = sqlx::query_as!(
         NodeRecord,
         r#"
-SELECT id, first_seen, last_seen, enabled as "enabled: bool", ek_public, ak_public, ak_name FROM nodes
+SELECT id, first_seen, last_login, enabled as "enabled: bool", ek_public, ak_public, ak_name FROM nodes
         "#,
     )
     .fetch_all(&mut *conn)
@@ -113,7 +112,7 @@ pub async fn get_or_create_node_by_ek(
     let existing = sqlx::query_as!(
         NodeRecord,
         r#"
-SELECT id, first_seen, last_seen, enabled as "enabled: bool", ek_public, ak_public, ak_name
+SELECT id, first_seen, last_login, enabled as "enabled: bool", ek_public, ak_public, ak_name
 FROM nodes
 WHERE ek_public = ?1
         "#,
@@ -123,12 +122,12 @@ WHERE ek_public = ?1
     .await?;
 
     if let Some(mut node) = existing {
-        // Update last_seen and ak values (they may change across boots)
+        // Update last_login and ak values (they may change across boots)
         let now = Local::now().to_rfc3339();
         sqlx::query!(
             r#"
 UPDATE nodes
-SET last_seen = ?1, ak_public = ?2, ak_name = ?3
+SET last_login = ?1, ak_public = ?2, ak_name = ?3
 WHERE id = ?4
             "#,
             now,
@@ -139,7 +138,7 @@ WHERE id = ?4
         .execute(&mut *conn)
         .await?;
 
-        node.last_seen = now;
+        node.last_login = Some(now);
         node.ak_public = ak_public.to_string();
         node.ak_name = ak_name.to_string();
         Ok((node, false)) // Existing node, not created
@@ -149,10 +148,9 @@ WHERE id = ?4
 
         let id = sqlx::query!(
             r#"
-INSERT INTO nodes (first_seen, last_seen, ek_public, ak_public, ak_name)
-VALUES (?1, ?2, ?3, ?4, ?5)
+INSERT INTO nodes (first_seen, last_login, ek_public, ak_public, ak_name)
+VALUES (?1, NULL, ?2, ?3, ?4)
             "#,
-            now,
             now,
             ek_public,
             ak_public,
@@ -165,8 +163,8 @@ VALUES (?1, ?2, ?3, ?4, ?5)
         Ok((
             NodeRecord {
                 id,
-                first_seen: now.clone(),
-                last_seen: now,
+                first_seen: now,
+                last_login: None,
                 enabled: false, // New nodes default to disabled, require manual approval
                 ek_public: ek_public.to_string(),
                 ak_public: ak_public.to_string(),
@@ -193,6 +191,40 @@ WHERE id = ?
     .last_insert_rowid();
 
     Ok(id)
+}
+
+/// Update last_login for a node and return whether this is the first authentication
+/// Returns true if last_login is NULL (meaning this is the first login after creation)
+pub async fn update_last_login(pool: &SqlitePool, id: i64) -> anyhow::Result<bool> {
+    let mut conn = pool.acquire().await?;
+
+    // Get current last_login to check if this is first auth
+    let node = sqlx::query!(
+        r#"
+SELECT last_login FROM nodes WHERE id = ?
+        "#,
+        id
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    let is_first_auth = node.last_login.is_none();
+
+    // Update last_login
+    let now = Local::now().to_rfc3339();
+    sqlx::query!(
+        r#"
+UPDATE nodes
+SET last_login = ?1
+WHERE id = ?2
+        "#,
+        now,
+        id
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(is_first_auth)
 }
 
 pub async fn enable_node(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
