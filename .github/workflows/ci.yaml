@@ -34,6 +34,7 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Cargo fmt
         uses: actions-rs/cargo@v1
         with:
@@ -76,6 +77,7 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy   
+      - uses: Swatinem/rust-cache@v2
       - name: Install sqlx-cli
         uses: actions-rs/cargo@v1
         with:

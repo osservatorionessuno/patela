@@ -5,7 +5,8 @@ use tss_esapi::attributes::{NvIndexAttributesBuilder, SessionAttributesBuilder};
 use tss_esapi::constants::SessionType;
 use tss_esapi::constants::{CapabilityType, tss::TPM2_PERSISTENT_FIRST};
 use tss_esapi::handles::{
-    AuthHandle, NvIndexHandle, NvIndexTpmHandle, ObjectHandle, PersistentTpmHandle, TpmHandle,
+    AuthHandle, NvIndexHandle, NvIndexTpmHandle, ObjectHandle, PersistentTpmHandle, SessionHandle,
+    TpmHandle,
 };
 use tss_esapi::interface_types::algorithm::{HashingAlgorithm, SignatureSchemeAlgorithm};
 use tss_esapi::interface_types::data_handles::Persistent;
@@ -387,86 +388,222 @@ pub fn public_key_to_hex(public: &Public) -> anyhow::Result<String> {
     Ok(hex::encode(bytes))
 }
 
-// TODO: choose wisely
-const NV_INDEX: u32 = 0x0140_0000; // Middle of owner range
-pub const NV_SIZE: usize = 40 * 12;
+const NV_INDEX: u32 = 0x01000000; // Start of owner range
+const MAX_CHUNK_SIZE: usize = 512;
+const TPM2_PT_NV_INDEX_MAX: u32 = 0x00000117;
 
-pub fn get_nv_index_handle(ctx: &mut Context) -> anyhow::Result<NvIndexHandle> {
+pub fn get_max_nv_size(ctx: &mut Context) -> anyhow::Result<usize> {
+    let (capability_data, _) = ctx
+        .get_capability(CapabilityType::TpmProperties, TPM2_PT_NV_INDEX_MAX, 1)
+        .context("Failed to query TPM2_PT_NV_INDEX_MAX")?;
+
+    if let CapabilityData::TpmProperties(props) = capability_data
+        && let Some(prop) = props.first()
+    {
+        return Ok(prop.value() as usize);
+    }
+
+    anyhow::bail!("Failed to get max NV index size from TPM")
+}
+
+pub fn get_nv_index_handle(ctx: &mut Context) -> anyhow::Result<(NvIndexHandle, usize)> {
+    let max_size = get_max_nv_size(ctx)?;
     let nv_index_tpm_handle = NvIndexTpmHandle::new(NV_INDEX)?;
 
-    // Check if it exists by trying to query capabilities
-    let mut property = 0x01000000u32; // Start of NV index range
-    let mut exists = false;
+    if nv_index_exists(ctx, NV_INDEX)? {
+        let handle = ctx
+            .tr_from_tpm_public(TpmHandle::NvIndex(nv_index_tpm_handle))
+            .context("Failed to get existing NV index handle")?;
 
-    while let Ok((capability_data, more)) =
-        ctx.get_capability(CapabilityType::Handles, property, 100)
-    {
+        let nv_public = ctx
+            .nv_read_public(handle.into())
+            .context("Failed to read NV public area")?;
+
+        let existing_size = nv_public.0.data_size();
+
+        if existing_size != max_size {
+            eprintln!(
+                "Warning: Existing NV index has size {}, but TPM max is {}. Consider recreating.",
+                existing_size, max_size
+            );
+        }
+
+        Ok((handle.into(), existing_size))
+    } else {
+        let handle = create_nv_index(ctx, nv_index_tpm_handle, max_size)?;
+        Ok((handle, max_size))
+    }
+}
+
+fn nv_index_exists(ctx: &mut Context, index: u32) -> anyhow::Result<bool> {
+    let mut property = 0x01000000u32;
+
+    loop {
+        let (capability_data, more) = ctx
+            .get_capability(CapabilityType::Handles, property, 100)
+            .context("Failed to query NV indices")?;
+
         if let CapabilityData::Handles(handles) = capability_data {
-            if handles.iter().any(|&h| TPM2_HANDLE::from(h) == NV_INDEX) {
-                exists = true;
-                break;
+            if handles.iter().any(|&h| TPM2_HANDLE::from(h) == index) {
+                return Ok(true);
             }
             if let Some(&last) = handles.last() {
                 property = TPM2_HANDLE::from(last) + 1;
             }
         }
+
         if !more {
             break;
         }
     }
 
-    if exists {
-        // Index exists, get proper handle
-        let handle = ctx.tr_from_tpm_public(TpmHandle::NvIndex(nv_index_tpm_handle))?;
-        Ok(handle.into())
-    } else {
-        // Create new index
-        let attrs = NvIndexAttributesBuilder::new()
-            .with_owner_read(true)
-            .with_owner_write(true)
-            .build()?;
-
-        let nv_public = NvPublicBuilder::new()
-            .with_nv_index(nv_index_tpm_handle)
-            .with_index_name_algorithm(HashingAlgorithm::Sha256)
-            .with_index_attributes(attrs)
-            .with_data_area_size(NV_SIZE)
-            .build()?;
-
-        ctx.execute_with_session(Some(AuthSession::Password), |ctx| {
-            ctx.nv_define_space(Provision::Owner, None, nv_public)
-        })?;
-
-        // Get proper handle after creation
-        let handle = ctx.tr_from_tpm_public(TpmHandle::NvIndex(nv_index_tpm_handle))?;
-        Ok(handle.into())
-    }
+    Ok(false)
 }
 
-pub fn nv_write_key(
+fn create_nv_index(
+    ctx: &mut Context,
+    nv_index_tpm_handle: NvIndexTpmHandle,
+    size: usize,
+) -> anyhow::Result<NvIndexHandle> {
+    let attrs = NvIndexAttributesBuilder::new()
+        .with_owner_read(true)
+        .with_owner_write(true)
+        .with_read_stclear(true)
+        .build()?;
+
+    let nv_public = NvPublicBuilder::new()
+        .with_nv_index(nv_index_tpm_handle)
+        .with_index_name_algorithm(HashingAlgorithm::Sha256)
+        .with_index_attributes(attrs)
+        .with_data_area_size(size)
+        .build()?;
+
+    let session = ctx
+        .start_auth_session(
+            None,
+            None,
+            None,
+            SessionType::Hmac,
+            SymmetricDefinition::AES_128_CFB,
+            HashingAlgorithm::Sha256,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("Failed to create auth session"))?;
+
+    ctx.execute_with_session(Some(session), |ctx| {
+        ctx.nv_define_space(Provision::Owner, None, nv_public)
+    })
+    .context("Failed to define NV space")?;
+
+    ctx.flush_context(SessionHandle::from(session).into())
+        .with_context(|| "Failed to clear session")?;
+
+    ctx.tr_from_tpm_public(TpmHandle::NvIndex(nv_index_tpm_handle))
+        .map(Into::into)
+        .context("Failed to get newly created NV index handle")
+}
+
+pub fn nv_write_data(
     ctx: &mut Context,
     nv_handle: NvIndexHandle,
-    key: &[u8; NV_SIZE],
+    data: &[u8],
 ) -> anyhow::Result<()> {
-    let buffer = MaxNvBuffer::try_from(key.to_vec())?;
+    let mut offset = 0usize;
 
-    ctx.execute_with_session(Some(AuthSession::Password), |ctx| {
-        ctx.nv_write(NvAuth::Owner, nv_handle, buffer, 0)
-    })?;
+    let session = ctx
+        .start_auth_session(
+            None,
+            None,
+            None,
+            SessionType::Hmac,
+            SymmetricDefinition::AES_128_CFB,
+            HashingAlgorithm::Sha256,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("Failed to create auth session"))?;
+
+    for chunk in data.chunks(MAX_CHUNK_SIZE) {
+        let buffer = MaxNvBuffer::try_from(chunk.to_vec()).context("Failed to create NV buffer")?;
+
+        ctx.execute_with_session(Some(session), |ctx| {
+            ctx.nv_write(NvAuth::Owner, nv_handle, buffer, offset as u16)
+        })
+        .with_context(|| format!("Failed to write chunk at offset {}", offset))?;
+
+        offset += chunk.len();
+    }
+
+    ctx.flush_context(SessionHandle::from(session).into())
+        .with_context(|| "Failed to clear session")?;
 
     Ok(())
 }
 
-pub fn nv_read_key(ctx: &mut Context, nv_handle: NvIndexHandle) -> anyhow::Result<[u8; NV_SIZE]> {
-    let data = ctx.execute_with_session(Some(AuthSession::Password), |ctx| {
-        ctx.nv_read(NvAuth::Owner, nv_handle, NV_SIZE as u16, 0)
-    })?;
+pub fn nv_read_data(ctx: &mut Context, nv_handle: NvIndexHandle) -> anyhow::Result<Vec<u8>> {
+    let nv_public = ctx
+        .nv_read_public(nv_handle)
+        .context("Failed to read NV public area")?;
 
-    let vec = data.to_vec();
-    if vec.len() != NV_SIZE {
-        anyhow::bail!("expected {} bytes got {}", NV_SIZE, vec.len())
+    let size = nv_public.0.data_size();
+    let mut result = vec![0u8; size];
+    let mut offset = 0usize;
+
+    let session = ctx
+        .start_auth_session(
+            None,
+            None,
+            None,
+            SessionType::Hmac,
+            SymmetricDefinition::AES_128_CFB,
+            HashingAlgorithm::Sha256,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("Failed to create auth session"))?;
+
+    for chunk in result.chunks_mut(MAX_CHUNK_SIZE) {
+        let chunk_size = chunk.len() as u16;
+
+        let data = ctx
+            .execute_with_session(Some(AuthSession::Password), |ctx| {
+                ctx.nv_read(NvAuth::Owner, nv_handle, chunk_size, offset as u16)
+            })
+            .with_context(|| format!("Failed to read chunk at offset {}", offset))?;
+
+        let vec = data.to_vec();
+        anyhow::ensure!(
+            vec.len() == chunk.len(),
+            "Expected {} bytes at offset {}, got {}",
+            chunk.len(),
+            offset,
+            vec.len()
+        );
+
+        chunk.copy_from_slice(&vec);
+        offset += chunk.len();
     }
-    let mut out = [0u8; NV_SIZE];
-    out.copy_from_slice(&vec);
-    Ok(out)
+
+    ctx.flush_context(SessionHandle::from(session).into())
+        .with_context(|| "Failed to clear session")?;
+
+    Ok(result)
+}
+
+pub fn delete_nv_index(ctx: &mut Context, nv_handle: NvIndexHandle) -> anyhow::Result<()> {
+    let session = ctx
+        .start_auth_session(
+            None,
+            None,
+            None,
+            SessionType::Hmac,
+            SymmetricDefinition::AES_128_CFB,
+            HashingAlgorithm::Sha256,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("Failed to create auth session"))?;
+
+    ctx.execute_with_session(Some(session), |ctx| {
+        ctx.nv_undefine_space(Provision::Owner, nv_handle)
+    })
+    .context("Failed to delete NV index")?;
+
+    ctx.flush_context(SessionHandle::from(session).into())
+        .with_context(|| "Failed to clear session")?;
+
+    Ok(())
 }

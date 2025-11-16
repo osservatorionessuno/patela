@@ -19,10 +19,10 @@ use rtnetlink::{
         link::{LinkAttribute, LinkExtentMask},
     },
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    ffi::CStr,
-    ffi::CString,
+    ffi::{CStr, CString},
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     os::unix::fs::chown,
@@ -40,6 +40,7 @@ const MANGLE_CHAIN_NAME: &CStr = c"mangle";
 const MANGLE_CHAIN_PRIORITY: i32 = libc::NF_IP_PRI_MANGLE;
 const NAT_CHAIN_NAME: &CStr = c"nat";
 pub const TOR_INSTANCE_LIB_DIR: &str = "/var/lib/tor-instances";
+const TOR_MASTER_KEY_NAME: &str = "ed25519_master_id_secret_key";
 
 pub fn collect_specs() -> anyhow::Result<HwSpecs> {
     let sys = System::new_all();
@@ -420,92 +421,68 @@ fn send_and_process(batch: &FinalizedBatch) -> anyhow::Result<()> {
     Ok(())
 }
 
-// Tor keys are stored in TPM NV storage
-// Serialization format: <instance-name>\0<key-bytes>\0<instance-name>\0<key-bytes>...
-fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Vec<u8>> {
-    let mut buffer = Vec::new();
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RelayKeyData {
+    pub instance_name: String,
+    #[serde(with = "serde_bytes")]
+    pub ed25519_master_id_secret_key: Vec<u8>,
+}
+
+pub fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Vec<u8>> {
+    let mut relay_keys = Vec::new();
 
     for relay in relays {
         let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
             .join(&relay.name)
             .join("keys");
 
-        let key_path = keys_dir.join("ed25519_master_id_secret_key");
+        let key_path = keys_dir.join(TOR_MASTER_KEY_NAME);
         let key_data = fs::read(&key_path)
             .map_err(|e| anyhow::anyhow!("Failed to read key for relay {}: {}", relay.name, e))?;
 
-        buffer.extend_from_slice(relay.name.as_bytes());
-        buffer.push(0);
-
-        buffer.extend_from_slice(&key_data);
-        buffer.push(0);
+        relay_keys.push(RelayKeyData {
+            instance_name: relay.name.clone(),
+            ed25519_master_id_secret_key: key_data,
+        });
     }
+    let json = serde_json::to_string(&relay_keys)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize backup to JSON: {}", e))?;
 
-    // Pad to NV_SIZE if needed
-    if buffer.len() > NV_SIZE {
-        anyhow::bail!(
-            "Serialized keys exceed NV_SIZE: {} > {}",
-            buffer.len(),
-            NV_SIZE
-        );
-    }
-    buffer.resize(NV_SIZE, 0);
+    let bytes = json.into_bytes();
 
-    Ok(buffer)
+    Ok(bytes)
 }
 
-fn deserialize_relay_keys(data: &[u8]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-    let mut result = Vec::new();
-    let mut pos = 0;
+pub fn deserialize_relay_keys(data: &[u8]) -> anyhow::Result<Vec<RelayKeyData>> {
+    let trimmed = data
+        .iter()
+        .rposition(|&b| b != 0)
+        .map(|pos| &data[..=pos])
+        .unwrap_or(data);
 
-    while pos < data.len() {
-        // Skip padding zeros at the end
-        if data[pos] == 0 {
-            break;
-        }
+    let json_str = std::str::from_utf8(trimmed)
+        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in backup data: {}", e))?;
 
-        // Read instance name until null terminator
-        let name_end = data[pos..]
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or_else(|| anyhow::anyhow!("Missing null terminator for instance name"))?;
+    let backup: Vec<RelayKeyData> = serde_json::from_str(json_str)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize backup data: {}", e))?;
 
-        let name = String::from_utf8(data[pos..pos + name_end].to_vec())
-            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in instance name: {}", e))?;
-        pos += name_end + 1; // Skip null terminator
-
-        if pos >= data.len() {
-            anyhow::bail!("Truncated key data for instance {}", name);
-        }
-
-        // Read key data until null terminator
-        let key_end = data[pos..]
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or_else(|| anyhow::anyhow!("Missing null terminator for key data"))?;
-
-        let key_data = data[pos..pos + key_end].to_vec();
-        pos += key_end + 1; // Skip null terminator
-
-        result.push((name, key_data));
-    }
-
-    Ok(result)
+    Ok(backup)
 }
 
 pub fn backup_tor_keys_to_tpm(
     ctx: &mut TpmContext,
     nv_handle: NvIndexHandle,
+    nv_size: usize,
     relays: &[ResolvedRelayRecord],
 ) -> anyhow::Result<()> {
     println!("Backing up Tor relay keys to TPM...");
 
     let serialized = serialize_relay_keys(relays)?;
-    let key_array: [u8; NV_SIZE] = serialized
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Failed to convert to array"))?;
+    // Pad data to nv_size
+    let mut padded_data = serialized;
+    padded_data.resize(nv_size, 0);
 
-    nv_write_key(ctx, nv_handle, &key_array)?;
+    nv_write_data(ctx, nv_handle, &padded_data)?;
 
     println!("Successfully backed up {} relay keys to TPM", relays.len());
     Ok(())
@@ -514,18 +491,19 @@ pub fn backup_tor_keys_to_tpm(
 pub fn restore_tor_keys_from_tpm(
     ctx: &mut TpmContext,
     nv_handle: NvIndexHandle,
+    _nv_size: usize,
     relays: &[ResolvedRelayRecord],
 ) -> anyhow::Result<()> {
     println!("Restoring Tor relay keys from TPM");
 
-    let data = nv_read_key(ctx, nv_handle)?;
+    let data = nv_read_data(ctx, nv_handle)?;
     let restored_keys = deserialize_relay_keys(&data)?;
 
     for relay in relays {
         let key_data = restored_keys
             .iter()
-            .find(|(name, _)| name == &relay.name)
-            .map(|(_, key)| key)
+            .find(|rk| rk.instance_name == relay.name)
+            .map(|rk| rk.ed25519_master_id_secret_key.clone())
             .ok_or_else(|| anyhow::anyhow!("No backup found for relay {}", relay.name))?;
 
         let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
@@ -534,7 +512,7 @@ pub fn restore_tor_keys_from_tpm(
 
         fs::create_dir_all(&keys_dir)?;
 
-        let key_path = keys_dir.join("ed25519_master_id_secret_key");
+        let key_path = keys_dir.join(TOR_MASTER_KEY_NAME);
         fs::write(&key_path, key_data)
             .map_err(|e| anyhow::anyhow!("Failed to write key for relay {}: {}", relay.name, e))?;
 
