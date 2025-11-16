@@ -11,10 +11,6 @@ lazy_static! {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1024);
-    pub static ref RELAY_OR_PORT: u16 = env::var("PATELA_RELAY_OR_PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(9001);
 }
 
 /// This is not used now because we assume dhcp server working correctly
@@ -24,20 +20,6 @@ pub struct NetworkConf {
     pub ipv6_gateway: String,
     pub dns_server: Option<String>,
     pub interface_name: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Network {
-    pub addr: String,
-    pub prefix: u8,
-}
-
-/// Network device
-#[derive(Serialize, Deserialize, Debug)]
-pub struct HwSpecsNetwork {
-    pub name: String,
-    pub mac_addr: String,
-    pub address: Vec<Network>,
 }
 
 /// Hw info

@@ -128,21 +128,6 @@ pub fn create_and_persist(context: &mut Context) -> anyhow::Result<KeyHandle> {
     Ok(encrypt_primary.key_handle)
 }
 
-pub fn list_primary(context: &mut Context) -> anyhow::Result<Option<KeyHandle>> {
-    let handler = get_persistent_handler()?;
-    let found = find_persistent_handle(context, handler)?;
-
-    if let Some(handle) = found {
-        context
-            .flush_context(handle)
-            .context("Call to flush_context failed")?;
-        Ok(Some(handle.into()))
-    } else {
-        println!("No primary key stored in persistent handle");
-        Ok(None)
-    }
-}
-
 pub fn encrypt(context: &mut Context, plain_text: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     let handler = get_persistent_handler()?;
     let handle = find_persistent_handle(context, handler)?
@@ -402,12 +387,6 @@ pub fn public_key_to_hex(public: &Public) -> anyhow::Result<String> {
     Ok(hex::encode(bytes))
 }
 
-pub fn public_key_to_base64(public: &Public) -> anyhow::Result<String> {
-    use base64::Engine;
-    let bytes = public.marshall()?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
-}
-
 // TODO: choose wisely
 const NV_INDEX: u32 = 0x0140_0000; // Middle of owner range
 pub const NV_SIZE: usize = 40 * 12;
@@ -490,44 +469,4 @@ pub fn nv_read_key(ctx: &mut Context, nv_handle: NvIndexHandle) -> anyhow::Resul
     let mut out = [0u8; NV_SIZE];
     out.copy_from_slice(&vec);
     Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tss_esapi::{
-        TctiNameConf,
-        structures::Name,
-        traits::{Marshall, UnMarshall},
-    };
-
-    #[test]
-    fn attestation() -> anyhow::Result<()> {
-        let tcti =
-            TctiNameConf::from_environment_variable().expect("Failed to get TCTI from environment");
-        let mut context = Context::new(tcti)?;
-
-        let (ek_ecc, ek_public, ak_ecc, _ak_public) = load_attestation_keys(&mut context)?;
-
-        // Get the AK name
-        let (_ak_pub, ak_name, _qualified_name) = context.read_public(ak_ecc)?;
-
-        // Test the marshal convertion as for api
-        let b_ak_name = ak_name.value();
-        let b_ek_public = ek_public.marshall()?;
-
-        // Create the attestation challenge (can be done without TPM context)
-        let challenge = b"test challenge data";
-        let (blob, secret) = patela_server::tpm::create_attestation_credentials(
-            Public::unmarshall(&b_ek_public)?,
-            Name::try_from(b_ak_name.to_vec())?,
-            challenge,
-        )?;
-        let result = resolve_attestation_challenge(&mut context, ek_ecc, ak_ecc, blob, secret)?;
-
-        // The result should match the challenge
-        assert_eq!(challenge.as_slice(), result.as_bytes());
-
-        Ok(())
-    }
 }

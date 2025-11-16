@@ -58,7 +58,12 @@ enum Commands {
         skip_net: bool,
         #[arg(long, action, help = "Do not try to restore long term keys")]
         skip_restore: bool,
-        #[arg(long, env = "PATELA_INSECURE", action, help = "Skip TLS certificate validation (insecure)")]
+        #[arg(
+            long,
+            env = "PATELA_INSECURE",
+            action,
+            help = "Skip TLS certificate validation (insecure)"
+        )]
         insecure: bool,
     },
     /// Mainly for development and basic maintenances
@@ -211,11 +216,11 @@ async fn cmd_start(
         let secret = EncryptedSecret::try_from(secret_chunk.to_vec())?;
 
         // Resolve the attestation challenge for this block
-        let decrypted_digest = context
+        let decrypted_challenge = context
             .activate_credential(ak_ecc, ek_ecc, blob.clone(), secret.clone())
             .with_context(|| "Failed to activate credential")?;
 
-        all_decrypted_data.extend_from_slice(decrypted_digest.as_bytes());
+        all_decrypted_data.extend_from_slice(decrypted_challenge.as_bytes());
 
         context.clear_sessions();
 
@@ -461,7 +466,7 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
             // Get the AK name
             let (_ak_pub, ak_name, _qualified_name) = context.read_public(_ak_ecc)?;
 
-            println!("=== TPM Identity Keys for V2 Migration ===");
+            println!("=== TPM Identity Keys for Database Migration ===");
             println!();
             println!("Copy these values to your migration SQL:");
             println!();

@@ -1,3 +1,8 @@
+// TPM attestation-based authentication
+// - SERVER_CA is used for TLS server certificate validation (HTTPS security)
+// - Node identity uses TPM keys (EK, AK, AK Name) sent in AuthRequest
+// - No client certificates are used for node authentication
+
 use std::time::Duration;
 
 use reqwest::{Client, tls};
@@ -8,6 +13,8 @@ use crate::SERVER_CA;
 
 const SERVER_TIMEOUT_SEC: u64 = 5;
 
+/// Authentication request with TPM public keys
+/// Node identity is based on the triple: (ek_public, ak_public, ak_name)
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthRequest {
     pub ek_public: Public,

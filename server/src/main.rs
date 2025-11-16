@@ -1,10 +1,8 @@
-use actix_tls::accept::rustls_0_23::TlsStream;
 use actix_web::{
     App, FromRequest, HttpRequest, HttpResponse, HttpServer, Responder,
-    dev::{Extensions, ServiceRequest},
+    dev::ServiceRequest,
     error::{ErrorInternalServerError, ErrorNotFound, ErrorUnauthorized},
     get, middleware, post,
-    rt::net::TcpStream,
     web::{self, Data, Json, Path},
 };
 use rustls::pki_types::pem::PemObject;
@@ -26,7 +24,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer},
 };
 use sqlx::SqlitePool;
-use std::{any::Any, path::PathBuf};
+use std::path::PathBuf;
 
 const TPM_CREDENTIALS_BLOCK_SIZE: usize = 20;
 
@@ -454,22 +452,7 @@ async fn ok_validator(
     Ok(req)
 }
 
-fn get_client_cert(connection: &dyn Any, data: &mut Extensions) {
-    if let Some(tls_socket) = connection.downcast_ref::<TlsStream<TcpStream>>() {
-        info!("TLS on_connect");
-
-        let (_, tls_session) = tls_socket.get_ref();
-
-        if let Some(certs) = tls_session.peer_certificates() {
-            info!("client certificate found");
-
-            // insert a `rustls::Certificate` into request data
-            data.insert(certs.last().unwrap().clone());
-        }
-    } else if connection.downcast_ref::<TcpStream>().is_some() {
-        info!("plaintext on_connect");
-    }
-}
+// Node authentication uses TPM attestation (not client certificates)
 
 /// Helper function to filter out ORPort and Nickname directives from TorConfig
 fn filter_tor_config(
@@ -551,7 +534,6 @@ async fn cmd_run(
             )
             .wrap(middleware::Logger::new("%t %s %U"))
     })
-    .on_connect(get_client_cert)
     .bind_rustls_0_23((host, port), config)?
     .run()
     .await
@@ -743,8 +725,16 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             // Pretty print node configuration
                             println!("{}", "Network Configuration:".bright_yellow().bold());
-                            println!("  {} {}", "IPv4 Gateway:".bright_blue(), c.network.ipv4_gateway.white());
-                            println!("  {} {}", "IPv6 Gateway:".bright_blue(), c.network.ipv6_gateway.white());
+                            println!(
+                                "  {} {}",
+                                "IPv4 Gateway:".bright_blue(),
+                                c.network.ipv4_gateway.white()
+                            );
+                            println!(
+                                "  {} {}",
+                                "IPv6 Gateway:".bright_blue(),
+                                c.network.ipv6_gateway.white()
+                            );
                             if let Some(dns) = &c.network.dns_server {
                                 println!("  {} {}", "DNS Server:".bright_blue(), dns.white());
                             }

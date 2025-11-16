@@ -1,3 +1,7 @@
+-- OBSOLETE: This migration creates the legacy schema with certificate-based authentication.
+-- It has been superseded by 20251014081633_v2.up.sql which implements TPM attestation.
+-- This file is kept for historical reference only.
+
 -- Add migration script here
 
 -- Relay table

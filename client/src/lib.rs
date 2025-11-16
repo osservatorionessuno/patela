@@ -1,17 +1,6 @@
 include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
 use crate::tpm::*;
-use aes_gcm::{
-    AeadCore, Aes256Gcm, AesGcm, KeyInit,
-    aead::{
-        OsRng,
-        consts::{B0, B1},
-    },
-    aes::{
-        Aes256,
-        cipher::typenum::{UInt, UTerm},
-    },
-};
 use etc_passwd::Passwd;
 use futures::TryStreamExt;
 use ipnetwork::IpNetwork;
@@ -21,8 +10,7 @@ use nftnl::{
     nft_expr,
     nftnl_sys::libc,
 };
-use patela_server::{HwSpecs, HwSpecsNetwork, Network, db::ResolvedRelayRecord};
-use reqwest::Client;
+use patela_server::{HwSpecs, db::ResolvedRelayRecord};
 use rtnetlink::{
     LinkUnspec, RouteMessageBuilder,
     packet_route::{
@@ -40,8 +28,7 @@ use std::{
     os::unix::fs::chown,
     path::Path,
 };
-use sysinfo::{Networks, System};
-use tar::{Archive, Builder};
+use sysinfo::System;
 use tss_esapi::Context as TpmContext;
 use tss_esapi::handles::NvIndexHandle;
 
@@ -58,33 +45,15 @@ pub fn collect_specs() -> anyhow::Result<HwSpecs> {
     let sys = System::new_all();
     let cpu = sys.cpus().first().unwrap();
 
-    let _networks: Vec<HwSpecsNetwork> = Networks::new_with_refreshed_list()
-        .iter()
-        .map(|(interface_name, data)| HwSpecsNetwork {
-            name: interface_name.to_string(),
-            mac_addr: data.mac_address().to_string(),
-            address: data
-                .ip_networks()
-                .to_vec()
-                .iter()
-                .map(|n| Network {
-                    addr: n.addr.to_string(),
-                    prefix: n.prefix,
-                })
-                .collect(),
-        })
-        .collect();
-
     Ok(HwSpecs {
         n_cpus: sys.cpus().len(),
         cpu_name: cpu.name().to_string(),
         cpu_freqz: cpu.frequency(),
         memory: sys.total_memory(),
-        //network: networks,
     })
 }
 
-/// Generate torrc from ResolvedRelayRecord (v2 configuration system)
+/// Generate torrc from ResolvedRelayRecord
 pub fn generate_torrc(relay: &patela_server::db::ResolvedRelayRecord) -> anyhow::Result<String> {
     use std::collections::BTreeMap;
 
@@ -439,9 +408,9 @@ fn send_and_process(batch: &FinalizedBatch) -> anyhow::Result<()> {
 
     let portid = socket.portid();
     let mut buffer = vec![0; nftnl::nft_nlmsg_maxsize() as usize];
-    let very_unclear_what_this_is_for = 0;
+    let netlink_sequence_number = 0; // Sequence number for netlink messages (can be 0)
     while let Some(message) = socket_recv(&socket, &mut buffer[..])? {
-        match mnl::cb_run(message, very_unclear_what_this_is_for, portid)? {
+        match mnl::cb_run(message, netlink_sequence_number, portid)? {
             mnl::CbResult::Stop => {
                 break;
             }
@@ -451,108 +420,7 @@ fn send_and_process(batch: &FinalizedBatch) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Create an in-memory tar archive, because the content are crypt keys is not very useful to
-/// compress the archive, but maybe in future could be interesting. The reason for archive is just
-/// for easy storing/encrypt/decrypt as a single blob
-pub fn backup_tor_keys(name: &str) -> anyhow::Result<Vec<u8>> {
-    let mut archive = Builder::new(Vec::new());
-
-    archive.append_dir_all(
-        ".",
-        Path::new(&TOR_INSTANCE_LIB_DIR).join(name).join("keys"),
-    )?;
-
-    Ok(archive.into_inner()?)
-}
-
-/// Unarchive tor keys in a tor instance directory, make sure that the directory exist
-pub fn restore_tor_keys(name: &str, data: &[u8]) -> anyhow::Result<()> {
-    let mut archive = Archive::new(data);
-    archive
-        .unpack(Path::new(&TOR_INSTANCE_LIB_DIR).join(name).join("keys/"))
-        .map_err(anyhow::Error::from)
-}
-
-// Generate aes-gcp key from os random and a one-time nonce that should be renovated each time, the
-// key is stored encrypted on the server
-pub async fn generate_aes_cipher_and_store(
-    tpm_ctx: &mut tss_esapi::Context,
-    client: &Client,
-    server_url: &str,
-    session_token: &str,
-) -> anyhow::Result<(
-    AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>,
-    [u8; 12],
-)> {
-    // Generate key random
-    let key = Aes256Gcm::generate_key(OsRng);
-
-    // The nonce should be used only once and shared
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-
-    // encrypt the aes key with tpm
-    let ciphered_key = tpm::encrypt(tpm_ctx, key.to_vec())?;
-
-    let _ = client
-        .post(format!("{}/private/node/key", server_url))
-        .bearer_auth(session_token)
-        .body(ciphered_key)
-        .send()
-        .await?
-        .error_for_status()?;
-
-    let _ = client
-        .post(format!("{}/private/node/nonce", server_url))
-        .bearer_auth(session_token)
-        .body(nonce.to_vec())
-        .send()
-        .await?
-        .error_for_status()?;
-
-    let cipher = Aes256Gcm::new(&key);
-
-    Ok((cipher, nonce.into()))
-}
-
-// Fetch aes-gcp key and nonce from server, encrypt with the tpm before storing
-pub async fn fetch_aes_key(
-    tpm_ctx: &mut tss_esapi::Context,
-    client: &Client,
-    server_url: &str,
-    session_token: &str,
-) -> anyhow::Result<(
-    AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>,
-    [u8; 12],
-)> {
-    let ciphered_key = client
-        .get(format!("{}/private/node/key", server_url))
-        .bearer_auth(session_token)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-
-    let nonce: Vec<u8> = client
-        .get(format!("{}/private/node/nonce", server_url))
-        .bearer_auth(session_token)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?
-        .into();
-
-    // decrypt aes key with tpm
-    let key = tpm::decrypt(tpm_ctx, ciphered_key.into())?;
-
-    let cipher = Aes256Gcm::new(key.as_slice().into());
-
-    let nonce_array: [u8; 12] = nonce.as_slice().try_into()?;
-
-    Ok((cipher, nonce_array))
-}
-
+// Tor keys are stored in TPM NV storage
 // Serialization format: <instance-name>\0<key-bytes>\0<instance-name>\0<key-bytes>...
 fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Vec<u8>> {
     let mut buffer = Vec::new();

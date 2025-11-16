@@ -57,6 +57,7 @@ pub struct RelayRecord {
     pub tor_conf: Option<TorConfig>,
 }
 
+#[cfg(test)]
 pub async fn create_node(
     pool: &SqlitePool,
     ek_public: &str,
@@ -176,6 +177,7 @@ VALUES (?1, ?2, ?3, ?4, ?5)
     }
 }
 
+#[cfg(test)]
 pub async fn remove_node(pool: &SqlitePool, id: i64) -> anyhow::Result<i64> {
     let mut conn = pool.acquire().await?;
 
