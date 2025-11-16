@@ -1393,9 +1393,9 @@ RelayBandwidthBurst 150 MB
         let relay_bw_burst = resolved.directives.get("RelayBandwidthBurst").unwrap();
         assert_eq!(relay_bw_burst[0].as_string(), Some("150 MB"));
 
-        // Global config values should be present
+        // Nickname should be the cheese name (first available: murazzano)
         let nickname = resolved.directives.get("Nickname").unwrap();
-        assert_eq!(nickname[0].as_string(), Some("testnode"));
+        assert_eq!(nickname[0].as_string(), Some("murazzano"));
 
         let relay_bw_rate = resolved.directives.get("RelayBandwidthRate").unwrap();
         assert_eq!(relay_bw_rate[0].as_string(), Some("40 MB"));
