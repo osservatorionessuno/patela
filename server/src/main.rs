@@ -586,6 +586,31 @@ async fn main() -> anyhow::Result<()> {
 
     match config.cmd {
         Commands::Run(run_conf) => {
+            // Check if global default configuration exists before starting
+            let global_tor_conf = get_global_tor_conf(&pool).await?;
+            let global_node_conf = get_global_node_conf(&pool).await?;
+
+            if global_tor_conf.is_none() {
+                log::warn!(
+                    "No global Tor configuration found - clients may fail to configure relays"
+                );
+            }
+
+            if global_node_conf.is_none() {
+                log::warn!(
+                    "No global node configuration found - clients may fail to configure network"
+                );
+            }
+
+            if global_tor_conf.is_none() || global_node_conf.is_none() {
+                anyhow::bail!(
+                    "Cannot start server: No global default configuration found.\n\
+                    Please set at least one global configuration:\n\
+                    - Tor configuration: conf import <torrc-file> default\n\
+                    - Node configuration:patela conf import-node-conf <json-file> default"
+                );
+            }
+
             cmd_run(
                 pool,
                 run_conf.host,
