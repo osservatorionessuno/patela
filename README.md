@@ -218,13 +218,13 @@ cargo run -p client
 Check the variable configuration and export the environment
 
 ```console
-set +a && source .env && set -a
+set -a && source .env && set +a
 ```
 
 Test server
 
 ```console
-cargo run -p server
+cargo run -p patela-server -- run -vv
 ```
 
 For development this can be useful for logging and reload
@@ -283,9 +283,191 @@ swtpm socket --tpm2 \
 export TPM2TOOLS_TCTI="swtpm:host=localhost,port=2321"
 ```
 
-## Notes
+### Basic CLI operations
 
-Here are free words, both for documentation and for future blog post
+#### Server Configuration
+
+**Setup default Tor configuration:**
+
+```bash
+# Import a default torrc file
+cargo run -p patela-server -- torrc import misc/default.torrc default
+
+# View current global Tor configuration
+cargo run -p patela-server -- torrc get default
+
+# View as JSON
+cargo run -p patela-server -- torrc get default --json
+```
+
+**Setup default node (network) configuration:**
+
+```bash
+# Set global network configuration (required fields)
+cargo run -p patela-server -- node set ipv4_gateway 10.10.10.1 default
+cargo run -p patela-server -- node set ipv6_gateway fd00:1234:5678::1 default
+
+# Set optional fields
+cargo run -p patela-server -- node set dns_server 10.10.10.2 default
+cargo run -p patela-server -- node set interface_name eth0 default
+
+# View current global node configuration
+cargo run -p patela-server -- node get default
+# Output:
+# Network Configuration:
+#   IPv4 Gateway: 10.10.10.1
+#   IPv6 Gateway: fd00:1234:5678::1
+#   DNS Server: 10.10.10.2
+#   Interface Name: eth0
+
+# View as JSON
+cargo run -p patela-server -- node get default --json
+
+# Remove optional fields (sets to null)
+cargo run -p patela-server -- node remove dns_server default
+cargo run -p patela-server -- node remove interface_name default
+```
+
+**Complete example - Setting up a fresh server:**
+
+```bash
+# 1. Set up default Tor configuration
+cargo run -p patela-server -- torrc import misc/default.torrc default
+# ✓ Global default configuration imported successfully
+
+# 2. Set up default network configuration
+cargo run -p patela-server -- node set ipv4_gateway 10.10.10.1 default
+# ✓ Global default ipv4_gateway set to 10.10.10.1
+
+cargo run -p patela-server -- node set ipv6_gateway fd00:1234:5678::1 default
+# ✓ Global default ipv6_gateway set to fd00:1234:5678::1
+
+# 3. Verify configuration
+cargo run -p patela-server -- node get default
+# Network Configuration:
+#   IPv4 Gateway: 10.10.10.1
+#   IPv6 Gateway: fd00:1234:5678::1
+
+cargo run -p patela-server -- torrc get default
+# AvoidDiskWrites 1
+# RelayBandwidthRate 40 MB
+# RelayBandwidthBurst 80 MB
+# ...
+
+# 4. Start the server
+set -a && source pippo.env && set +a
+cargo run -p patela-server -- run -vvv
+
+# 5. When a client connects, check for pending nodes
+cargo run -p patela-server -- list node
+# ID  | First Seen          | Last Login          | Enabled | EK Public (first 16 chars)
+# 1   | 2025-11-17 10:30:00 | 2025-11-17 10:30:00 | false   | 0123456789abcdef...
+
+# 6. Enable the new node
+cargo run -p patela-server -- node enable 1
+# ✓ Node 1 enabled successfully
+
+# 7. View all relays
+cargo run -p patela-server -- list relay
+# ID  | Node | Name       | IPv4          | IPv6                    | OR Port | Dir Port
+# 1   | 1    | murazzano  | 10.10.10.10   | fd00:1234:5678::100     | 9001    | 9030
+# 2   | 1    | montebore  | 10.10.10.11   | fd00:1234:5678::101     | 9001    | 9030
+```
+
+**Setup node-specific configuration:**
+
+```bash
+# Override Tor configuration for a specific node
+cargo run -p patela-server -- torrc import custom-node.torrc node --id 1
+
+# Override network configuration for a specific node
+cargo run -p patela-server -- node set ipv4_gateway 10.20.20.1 node --id 1
+cargo run -p patela-server -- node set dns_server 10.20.20.2 node --id 1
+
+# View node-specific configuration
+cargo run -p patela-server -- node get node --id 1
+```
+
+**Setup relay-specific configuration:**
+
+```bash
+# Override Tor configuration for a specific relay
+cargo run -p patela-server -- torrc import custom-relay.torrc relay --id murazzano
+```
+
+#### Node Management
+
+**List nodes and relays:**
+
+```bash
+# List all nodes and relays
+cargo run -p patela-server -- list all
+
+# List only nodes
+cargo run -p patela-server -- list node
+
+# List only relays
+cargo run -p patela-server -- list relay
+
+# Filter by name
+cargo run -p patela-server -- list all murazzano
+```
+
+**Enable/disable nodes:**
+
+```bash
+# Enable a node (allow authentication and relay creation)
+cargo run -p patela-server -- node enable 1
+
+# Disable a node (block authentication)
+cargo run -p patela-server -- node disable 1
+```
+
+#### Running the Server
+
+```bash
+# Run with environment variables from pippo.env
+set -a && source pippo.env && set +a
+cargo run -p patela-server -- run
+
+# Run with verbose logging
+cargo run -p patela-server -- run -vvv
+
+# Run with custom options
+cargo run -p patela-server -- run \
+  --host 0.0.0.0 \
+  --port 8020 \
+  --ssl-cert-file certs/server.cert \
+  --ssl-key-file certs/server.key \
+  --biscuit-key <hex-key>
+```
+
+#### Client Operations
+
+```bash
+# Run client (connects to server, configures relays)
+cargo run -p patela-client -- run --server https://server.example.com:8020
+
+# Skip network setup (useful for testing)
+cargo run -p patela-client -- run --server https://server.example.com:8020 --skip-net
+
+# Skip key restoration (fresh start)
+cargo run -p patela-client -- run --server https://server.example.com:8020 --skip-restore
+
+# TPM operations
+cargo run -p patela-client -- tpm attestate
+cargo run -p patela-client -- tpm print-keys
+cargo run -p patela-client -- tpm nv-read
+cargo run -p patela-client -- tpm nv-write
+
+# Network operations
+cargo run -p patela-client -- net list
+```
+
+
+Test tpm for attestation
+
+## Notes
 
 ### Authentication (V2)
 
@@ -384,7 +566,7 @@ Clear tpm from persistent setup
 Run patela with the server on the host
 
 ```console
-/mnt/target/x86_64-unknown-linux-gnu/debug/patela-client --server https://192.168.122.1:8020 --tpm2 /dev/tpmrm0
+/mnt/target/x86_64-unknown-linux-gnu/debug/patela-client --server https://10.10.10.1:8020 --tpm2 /dev/tpmrm0
 ```
 
 If you need to remove all ip address from interface for dev

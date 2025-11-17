@@ -30,33 +30,31 @@ const TPM_CREDENTIALS_SECRET_SIZE: usize = 68;
 
 #[derive(Subcommand, Debug, Clone)]
 enum NetCommands {
-    Add,
+    /// List network interfaces and ips
     List,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 enum TpmCommands {
-    ListPersistent,
-    CleanPersistent,
-    CreatePrimary,
-    Encrypt,
-    Decrypt,
-    NvRead,
-    NvWrite,
-    Test,
+    /// Simulate a remote attestation
     Attestate,
+    /// Read from NV-Memory
+    NvRead,
+    /// Write As into NV-Memory
+    NvWrite,
     /// Print TPM identity keys (EK, AK, AK Name) for database migration
     PrintKeys,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
-    Start {
-        #[arg(long, env = "PATELA_SERVER")]
+    /// Run patela, this is expected to be run in polling
+    Run {
+        #[arg(long, env = "PATELA_SERVER", help = "Endpoint for patela server")]
         server: String,
-        #[arg(long, action, help = "Do not run network setup")]
+        #[arg(long, action, help = "Skip network setup")]
         skip_net: bool,
-        #[arg(long, action, help = "Do not try to restore long term keys")]
+        #[arg(long, action, help = "Skip long term keys restoration")]
         skip_restore: bool,
         #[arg(
             long,
@@ -66,12 +64,12 @@ enum Commands {
         )]
         insecure: bool,
     },
-    /// Mainly for development and basic maintenances
+    /// Utily commands for development and basic maintenances
     Tpm {
         #[command(subcommand)]
         cmd: TpmCommands,
     },
-    /// Mainly for development and basic maintenances
+    /// Utily commands for development and basic maintenances
     Net {
         #[command(subcommand)]
         cmd: NetCommands,
@@ -94,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Starting patela...");
 
     match config.cmd {
-        Commands::Start {
+        Commands::Run {
             server,
             skip_net,
             skip_restore,
@@ -401,27 +399,6 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
     let context = &mut Context::new(tpm_device_name)?;
 
     match config {
-        TpmCommands::ListPersistent => {}
-        TpmCommands::CleanPersistent => {
-            remove_persitent_handle(context, get_persistent_handler()?)?;
-        }
-        TpmCommands::CreatePrimary => {
-            create_and_persist(context)?;
-        }
-        TpmCommands::Encrypt => {
-            let plain_text = "miao miao";
-            let cypher_text = encrypt(context, plain_text.as_bytes().to_vec())?;
-            let _ = fs::write("encrypted.txt", cypher_text);
-        }
-        TpmCommands::Decrypt => {
-            let input = fs::read("encrypted.txt")?;
-            let plain_text = decrypt(context, input)?;
-
-            println!(
-                "=== Decrypted data ===\n\n{}",
-                std::str::from_utf8(&plain_text)?
-            );
-        }
         TpmCommands::NvWrite => {
             let (nv_index_handle, size) = get_nv_index_handle(context).unwrap();
             let plain_text = "A".repeat(size);
@@ -436,9 +413,6 @@ async fn cmd_tpm(config: TpmCommands, tpm2: Option<String>) -> anyhow::Result<()
             let bytes = nv_read_data(context, nv_index_handle).unwrap();
             let text = std::str::from_utf8(&bytes).unwrap();
             println!("=== {} read from TPM NV ===", text);
-        }
-        TpmCommands::Test => {
-            test_aes_gcm(context)?;
         }
         TpmCommands::Attestate => {
             let (ek_ecc, ek_public, ak_ecc, ak_public) = load_attestation_keys(context)?;
@@ -492,7 +466,6 @@ async fn cmd_net(config: NetCommands) -> anyhow::Result<()> {
     tokio::spawn(connection);
 
     match config {
-        NetCommands::Add => {}
         NetCommands::List => {
             println!("=== Network Links and Addresses ===\n");
 
