@@ -125,24 +125,6 @@ enum CmdConfVerb {
         #[command(subcommand)]
         scope: CmdVerbScope,
     },
-    /// Import NodeConfig from JSON file
-    ImportNodeConf {
-        /// Input file, `-` for stdin
-        #[arg()]
-        input: InputSource,
-        /// Configuration scope
-        #[command(subcommand)]
-        scope: CmdConfNodeScope,
-    },
-    /// Get NodeConfig
-    GetNodeConf {
-        /// Configuration scope
-        #[command(subcommand)]
-        scope: CmdConfNodeScope,
-        /// Json format
-        #[arg(short, long)]
-        json: bool,
-    },
     /// Configure a configuration
     Set {
         #[command(subcommand)]
@@ -168,6 +150,47 @@ enum CmdConfVerb {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+enum CmdNodeVerb {
+    /// Set a node configuration value
+    Set {
+        /// Configuration scope
+        #[command(subcommand)]
+        scope: CmdConfNodeScope,
+        /// Configuration key (e.g., ipv4_gateway, ipv6_gateway, dns_server, interface_name)
+        key: String,
+        /// Configuration value
+        value: String,
+    },
+    /// Get NodeConfig
+    Get {
+        /// Configuration scope
+        #[command(subcommand)]
+        scope: CmdConfNodeScope,
+        /// Json format
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// Remove a node configuration value (set to null)
+    Remove {
+        /// Configuration scope
+        #[command(subcommand)]
+        scope: CmdConfNodeScope,
+        /// Configuration key to remove
+        key: String,
+    },
+    /// Enable a node (allow authentication and relay creation)
+    Enable {
+        /// Node ID to enable
+        node_id: i64,
+    },
+    /// Disable a node (block authentication)
+    Disable {
+        /// Node ID to disable
+        node_id: i64,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 enum Commands {
     /// Run patela web server
     Run(CmdRunArgs),
@@ -180,19 +203,14 @@ enum Commands {
         filter: Option<String>,
     },
     /// Handle global, node and relay configurations
-    Conf {
+    Torrc {
         #[command(subcommand)]
         verb: CmdConfVerb,
     },
-    /// Enable a node (allow authentication and relay creation)
-    Enable {
-        /// Node ID to enable
-        node_id: i64,
-    },
-    /// Disable a node (block authentication)
-    Disable {
-        /// Node ID to disable
-        node_id: i64,
+    /// Manage nodes
+    Node {
+        #[command(subcommand)]
+        verb: CmdNodeVerb,
     },
 }
 
@@ -606,8 +624,8 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!(
                     "Cannot start server: No global default configuration found.\n\
                     Please set at least one global configuration:\n\
-                    - Tor configuration: conf import <torrc-file> default\n\
-                    - Node configuration:patela conf import-node-conf <json-file> default"
+                    - Tor configuration: torrc import <torrc-file> default\n\
+                    - Node configuration: node set default ipv4_gateway <value> && node set default ipv6_gateway <value>"
                 );
             }
 
@@ -691,7 +709,7 @@ async fn main() -> anyhow::Result<()> {
             }
             println!();
         }
-        Commands::Conf { verb } => match verb {
+        Commands::Torrc { verb } => match verb {
             CmdConfVerb::Import { input, scope } => {
                 // Read input from file or stdin
                 let content = match input {
@@ -740,73 +758,6 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            CmdConfVerb::ImportNodeConf { input, scope } => {
-                // Read input from file or stdin
-                let content = match input {
-                    InputSource::Stdin => {
-                        let mut buffer = String::new();
-                        std::io::stdin().read_to_string(&mut buffer)?;
-                        buffer
-                    }
-                    InputSource::File(path) => std::fs::read_to_string(path)?,
-                };
-
-                // Parse JSON configuration
-                let node_conf: patela_server::NodeConfig = serde_json::from_str(&content)?;
-
-                match scope {
-                    CmdConfNodeScope::Default => {
-                        set_global_node_conf(&pool, &node_conf).await?;
-                        println!(
-                            "{} {}",
-                            "✓".green().bold(),
-                            "Global default node configuration imported successfully".green()
-                        );
-                    }
-                    CmdConfNodeScope::Node { id } => {
-                        set_node_node_conf(&pool, id, &node_conf).await?;
-                        println!(
-                            "{} Node {} node configuration imported successfully",
-                            "✓".green().bold(),
-                            id.to_string().cyan()
-                        );
-                    }
-                }
-            }
-            CmdConfVerb::GetNodeConf { scope, json } => {
-                let conf = match scope {
-                    CmdConfNodeScope::Default => get_global_node_conf(&pool).await?,
-                    CmdConfNodeScope::Node { id } => get_node_conf(&pool, id).await?,
-                };
-
-                match conf {
-                    Some(c) => {
-                        if json {
-                            println!("{}", serde_json::to_string_pretty(&c)?);
-                        } else {
-                            // Pretty print node configuration
-                            println!("{}", "Network Configuration:".bright_yellow().bold());
-                            println!(
-                                "  {} {}",
-                                "IPv4 Gateway:".bright_blue(),
-                                c.network.ipv4_gateway.white()
-                            );
-                            println!(
-                                "  {} {}",
-                                "IPv6 Gateway:".bright_blue(),
-                                c.network.ipv6_gateway.white()
-                            );
-                            if let Some(dns) = &c.network.dns_server {
-                                println!("  {} {}", "DNS Server:".bright_blue(), dns.white());
-                            }
-                            if let Some(iface) = &c.network.interface_name {
-                                println!("  {} {}", "Interface Name:".bright_blue(), iface.white());
-                            }
-                        }
-                    }
-                    None => println!("{} {}", "ℹ".blue(), "No node configuration found".yellow()),
-                }
-            }
             CmdConfVerb::Get { scope, json } => {
                 let conf = match scope {
                     CmdVerbScope::Default => get_global_tor_conf(&pool).await?,
@@ -853,24 +804,165 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Remove command not yet implemented");
             }
         },
-        Commands::Enable { node_id } => {
-            enable_node(&pool, node_id).await?;
-            println!(
-                "{} Node {} {}",
-                "✓".green().bold(),
-                node_id.to_string().cyan(),
-                "enabled successfully".green()
-            );
-        }
-        Commands::Disable { node_id } => {
-            disable_node(&pool, node_id).await?;
-            println!(
-                "{} Node {} {}",
-                "✓".green().bold(),
-                node_id.to_string().cyan(),
-                "disabled successfully".yellow()
-            );
-        }
+        Commands::Node { verb } => match verb {
+            CmdNodeVerb::Set { scope, key, value } => {
+                // Get existing config or create a new one
+                let mut node_conf = match &scope {
+                    CmdConfNodeScope::Default => {
+                        get_global_node_conf(&pool).await?.unwrap_or_else(|| {
+                            patela_server::NodeConfig {
+                                network: patela_server::NetworkConf {
+                                    ipv4_gateway: String::new(),
+                                    ipv6_gateway: String::new(),
+                                    dns_server: None,
+                                    interface_name: None,
+                                },
+                            }
+                        })
+                    }
+                    CmdConfNodeScope::Node { id } => {
+                        get_node_conf(&pool, *id).await?.unwrap_or_else(|| {
+                            patela_server::NodeConfig {
+                                network: patela_server::NetworkConf {
+                                    ipv4_gateway: String::new(),
+                                    ipv6_gateway: String::new(),
+                                    dns_server: None,
+                                    interface_name: None,
+                                },
+                            }
+                        })
+                    }
+                };
+
+                // Update the specific field
+                match key.as_str() {
+                    "ipv4_gateway" => node_conf.network.ipv4_gateway = value.clone(),
+                    "ipv6_gateway" => node_conf.network.ipv6_gateway = value.clone(),
+                    "dns_server" => node_conf.network.dns_server = Some(value.clone()),
+                    "interface_name" => node_conf.network.interface_name = Some(value.clone()),
+                    _ => anyhow::bail!("Unknown configuration key: {}. Valid keys: ipv4_gateway, ipv6_gateway, dns_server, interface_name", key),
+                }
+
+                // Save the updated config
+                match scope {
+                    CmdConfNodeScope::Default => {
+                        set_global_node_conf(&pool, &node_conf).await?;
+                        println!(
+                            "{} Global default {} set to {}",
+                            "✓".green().bold(),
+                            key.cyan(),
+                            value.yellow()
+                        );
+                    }
+                    CmdConfNodeScope::Node { id } => {
+                        set_node_node_conf(&pool, id, &node_conf).await?;
+                        println!(
+                            "{} Node {} {} set to {}",
+                            "✓".green().bold(),
+                            id.to_string().cyan(),
+                            key.cyan(),
+                            value.yellow()
+                        );
+                    }
+                }
+            }
+            CmdNodeVerb::Remove { scope, key } => {
+                // Get existing config
+                let mut node_conf = match &scope {
+                    CmdConfNodeScope::Default => {
+                        get_global_node_conf(&pool).await?
+                            .ok_or_else(|| anyhow::anyhow!("No global node configuration found"))?
+                    }
+                    CmdConfNodeScope::Node { id } => {
+                        get_node_conf(&pool, *id).await?
+                            .ok_or_else(|| anyhow::anyhow!("No node configuration found for node {}", id))?
+                    }
+                };
+
+                // Remove the specific field (set to None for optional fields)
+                match key.as_str() {
+                    "dns_server" => node_conf.network.dns_server = None,
+                    "interface_name" => node_conf.network.interface_name = None,
+                    "ipv4_gateway" | "ipv6_gateway" => {
+                        anyhow::bail!("Cannot remove required field: {}. Use 'set' to change its value.", key)
+                    }
+                    _ => anyhow::bail!("Unknown configuration key: {}. Valid keys: dns_server, interface_name", key),
+                }
+
+                // Save the updated config
+                match scope {
+                    CmdConfNodeScope::Default => {
+                        set_global_node_conf(&pool, &node_conf).await?;
+                        println!(
+                            "{} Global default {} removed",
+                            "✓".green().bold(),
+                            key.cyan()
+                        );
+                    }
+                    CmdConfNodeScope::Node { id } => {
+                        set_node_node_conf(&pool, id, &node_conf).await?;
+                        println!(
+                            "{} Node {} {} removed",
+                            "✓".green().bold(),
+                            id.to_string().cyan(),
+                            key.cyan()
+                        );
+                    }
+                }
+            }
+            CmdNodeVerb::Get { scope, json } => {
+                let conf = match scope {
+                    CmdConfNodeScope::Default => get_global_node_conf(&pool).await?,
+                    CmdConfNodeScope::Node { id } => get_node_conf(&pool, id).await?,
+                };
+
+                match conf {
+                    Some(c) => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&c)?);
+                        } else {
+                            // Pretty print node configuration
+                            println!("{}", "Network Configuration:".bright_yellow().bold());
+                            println!(
+                                "  {} {}",
+                                "IPv4 Gateway:".bright_blue(),
+                                c.network.ipv4_gateway.white()
+                            );
+                            println!(
+                                "  {} {}",
+                                "IPv6 Gateway:".bright_blue(),
+                                c.network.ipv6_gateway.white()
+                            );
+                            if let Some(dns) = &c.network.dns_server {
+                                println!("  {} {}", "DNS Server:".bright_blue(), dns.white());
+                            }
+                            if let Some(iface) = &c.network.interface_name {
+                                println!("  {} {}", "Interface Name:".bright_blue(), iface.white());
+                            }
+                        }
+                    }
+                    None => println!("{} {}", "ℹ".blue(), "No node configuration found".yellow()),
+                }
+            }
+            CmdNodeVerb::Enable { node_id } => {
+                enable_node(&pool, node_id).await?;
+                println!(
+                    "{} Node {} {}",
+                    "✓".green().bold(),
+                    node_id.to_string().cyan(),
+                    "enabled successfully".green()
+                );
+            }
+            CmdNodeVerb::Disable { node_id } => {
+                disable_node(&pool, node_id).await?;
+                println!(
+                    "{} Node {} {}",
+                    "✓".green().bold(),
+                    node_id.to_string().cyan(),
+                    "disabled successfully".yellow()
+                );
+            }
+        },
     }
     Ok(())
 }
