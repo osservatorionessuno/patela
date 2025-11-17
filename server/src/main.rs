@@ -807,32 +807,29 @@ async fn main() -> anyhow::Result<()> {
         Commands::Node { verb } => match verb {
             CmdNodeVerb::Set { scope, key, value } => {
                 // Get existing config or create a new one
-                let mut node_conf = match &scope {
-                    CmdConfNodeScope::Default => {
-                        get_global_node_conf(&pool).await?.unwrap_or_else(|| {
-                            patela_server::NodeConfig {
+                let mut node_conf =
+                    match &scope {
+                        CmdConfNodeScope::Default => get_global_node_conf(&pool)
+                            .await?
+                            .unwrap_or_else(|| patela_server::NodeConfig {
                                 network: patela_server::NetworkConf {
                                     ipv4_gateway: String::new(),
                                     ipv6_gateway: String::new(),
                                     dns_server: None,
                                     interface_name: None,
                                 },
-                            }
-                        })
-                    }
-                    CmdConfNodeScope::Node { id } => {
-                        get_node_conf(&pool, *id).await?.unwrap_or_else(|| {
-                            patela_server::NodeConfig {
+                            }),
+                        CmdConfNodeScope::Node { id } => get_node_conf(&pool, *id)
+                            .await?
+                            .unwrap_or_else(|| patela_server::NodeConfig {
                                 network: patela_server::NetworkConf {
                                     ipv4_gateway: String::new(),
                                     ipv6_gateway: String::new(),
                                     dns_server: None,
                                     interface_name: None,
                                 },
-                            }
-                        })
-                    }
-                };
+                            }),
+                    };
 
                 // Update the specific field
                 match key.as_str() {
@@ -840,7 +837,10 @@ async fn main() -> anyhow::Result<()> {
                     "ipv6_gateway" => node_conf.network.ipv6_gateway = value.clone(),
                     "dns_server" => node_conf.network.dns_server = Some(value.clone()),
                     "interface_name" => node_conf.network.interface_name = Some(value.clone()),
-                    _ => anyhow::bail!("Unknown configuration key: {}. Valid keys: ipv4_gateway, ipv6_gateway, dns_server, interface_name", key),
+                    _ => anyhow::bail!(
+                        "Unknown configuration key: {}. Valid keys: ipv4_gateway, ipv6_gateway, dns_server, interface_name",
+                        key
+                    ),
                 }
 
                 // Save the updated config
@@ -869,13 +869,13 @@ async fn main() -> anyhow::Result<()> {
             CmdNodeVerb::Remove { scope, key } => {
                 // Get existing config
                 let mut node_conf = match &scope {
-                    CmdConfNodeScope::Default => {
-                        get_global_node_conf(&pool).await?
-                            .ok_or_else(|| anyhow::anyhow!("No global node configuration found"))?
-                    }
+                    CmdConfNodeScope::Default => get_global_node_conf(&pool)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("No global node configuration found"))?,
                     CmdConfNodeScope::Node { id } => {
-                        get_node_conf(&pool, *id).await?
-                            .ok_or_else(|| anyhow::anyhow!("No node configuration found for node {}", id))?
+                        get_node_conf(&pool, *id).await?.ok_or_else(|| {
+                            anyhow::anyhow!("No node configuration found for node {}", id)
+                        })?
                     }
                 };
 
@@ -884,9 +884,15 @@ async fn main() -> anyhow::Result<()> {
                     "dns_server" => node_conf.network.dns_server = None,
                     "interface_name" => node_conf.network.interface_name = None,
                     "ipv4_gateway" | "ipv6_gateway" => {
-                        anyhow::bail!("Cannot remove required field: {}. Use 'set' to change its value.", key)
+                        anyhow::bail!(
+                            "Cannot remove required field: {}. Use 'set' to change its value.",
+                            key
+                        )
                     }
-                    _ => anyhow::bail!("Unknown configuration key: {}. Valid keys: dns_server, interface_name", key),
+                    _ => anyhow::bail!(
+                        "Unknown configuration key: {}. Valid keys: dns_server, interface_name",
+                        key
+                    ),
                 }
 
                 // Save the updated config
