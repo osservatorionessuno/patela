@@ -51,7 +51,7 @@ enum TpmCommands {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
-    Start {
+    Run {
         #[arg(long, env = "PATELA_SERVER")]
         server: String,
         #[arg(long, action, help = "Do not run network setup")]
@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Starting patela...");
 
     match config.cmd {
-        Commands::Start {
+        Commands::Run {
             server,
             skip_net,
             skip_restore,
