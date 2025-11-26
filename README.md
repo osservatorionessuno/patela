@@ -1,7 +1,7 @@
 # Patela
 
-Both client and server for disk-less tor configuration. Is a pull-based
-configuration manager that relies on tpm for identity and crypto operation.
+Patela is a pull-based configuration manager relying on tpm for identity and crypto operations.
+Both client and server are available on this repo for a diskless tor node configuration.
 
 **Patela** is the [piedmont](https://en.wikipedia.org/wiki/Piedmont) word for kick.
 
