@@ -764,10 +764,10 @@ pub async fn get_resolved_relay_conf(
 ) -> anyhow::Result<TorConfig> {
     let mut conn = pool.acquire().await?;
 
-    // Fetch the relay name (cheese name) from the database
+    // Fetch the relay name (cheese name) and IP addresses from the database
     let row = sqlx::query!(
         r#"
-SELECT cheeses.name AS name
+SELECT cheeses.name AS name, relays.ip_v4, relays.ip_v6
 FROM relays
 INNER JOIN cheeses ON relays.cheese_id = cheeses.id
 WHERE relays.id = ?
@@ -787,11 +787,29 @@ WHERE relays.id = ?
         relay_conf.as_ref(),
     );
 
-    // Append the Nickname directive with the relay's cheese name
+    // Set Nickname directive with the relay's cheese name
     use crate::tor_config::TorValue;
     merged
         .directives
         .insert("Nickname".to_string(), vec![TorValue::String(row.name)]);
+
+    // Set ORPort directives with the relay's public IPs
+    merged.directives.insert(
+        "ORPort".to_string(),
+        vec![
+            TorValue::String(format!("{}:9001", row.ip_v4)),
+            TorValue::String(format!("[{}]:9001", row.ip_v6)),
+        ],
+    );
+
+    // Set OutboundBindAddress directives with the relay's IPs
+    merged.directives.insert(
+        "OutboundBindAddress".to_string(),
+        vec![
+            TorValue::String(row.ip_v4.clone()),
+            TorValue::String(format!("[{}]", row.ip_v6)),
+        ],
+    );
 
     Ok(merged)
 }
@@ -1456,6 +1474,18 @@ RelayBandwidthBurst 150 MB
 
         let ipv6_exit = resolved.directives.get("IPv6Exit").unwrap();
         assert_eq!(ipv6_exit[0].as_bool(), Some(true));
+
+        // Verify ORPort is set with relay's public IPs
+        let or_port = resolved.directives.get("ORPort").unwrap();
+        assert_eq!(or_port.len(), 2);
+        assert_eq!(or_port[0].as_string(), Some("10.0.0.1:9001"));
+        assert_eq!(or_port[1].as_string(), Some("[::1]:9001"));
+
+        // Verify OutboundBindAddress is set with relay's IPs (brackets for IPv6)
+        let outbound = resolved.directives.get("OutboundBindAddress").unwrap();
+        assert_eq!(outbound.len(), 2);
+        assert_eq!(outbound[0].as_string(), Some("10.0.0.1"));
+        assert_eq!(outbound[1].as_string(), Some("[::1]"));
 
         Ok(())
     }
