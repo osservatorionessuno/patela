@@ -62,10 +62,6 @@ pub fn generate_torrc(relay: &patela_server::db::ResolvedRelayRecord) -> anyhow:
     let tor_conf = &relay.resolved_tor_conf;
     let mut torrc_lines = Vec::new();
 
-    // Add relay name as Nickname first
-    torrc_lines.push(format!("Nickname {}", relay.name));
-    torrc_lines.push(String::new());
-
     // Sort directives alphabetically for consistent output
     let sorted_directives: BTreeMap<_, _> = tor_conf.directives.iter().collect();
 
