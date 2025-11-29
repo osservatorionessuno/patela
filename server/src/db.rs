@@ -1,4 +1,4 @@
-use crate::{HwSpecs, NodeConfig, tor_config::TorConfig};
+use crate::{HwSpecs, NetworkConf, NodeConfig, tor_config::TorConfig};
 use anyhow::{anyhow, bail};
 use chrono::Local;
 use ipnetwork::Ipv4Network;
@@ -742,18 +742,43 @@ fn merge_tor_configs(
 
 /// Get the fully resolved NodeConfig for a node, falling back to global if not set
 pub async fn get_resolved_node_conf(pool: &SqlitePool, node_id: i64) -> anyhow::Result<NodeConfig> {
-    // Try to get node-specific config first
-    if let Some(conf) = get_node_conf(pool, node_id).await? {
-        return Ok(conf);
-    }
+    let global_conf = get_global_node_conf(pool).await?;
+    let node_conf = get_node_conf(pool, node_id).await?;
 
-    // Fall back to global node config
-    if let Some(conf) = get_global_node_conf(pool).await? {
-        return Ok(conf);
+    // Merge node config over global config
+    match (global_conf, node_conf) {
+        (Some(global), Some(node)) => Ok(merge_node_configs(&global, &node)),
+        (Some(global), None) => Ok(global),
+        (None, Some(node)) => Ok(node),
+        (None, None) => anyhow::bail!("No node configuration found for node {}", node_id),
     }
+}
 
-    // If neither exists, return an error
-    anyhow::bail!("No node configuration found for node {}", node_id)
+/// Merge two NodeConfig structures, with the override config taking precedence
+/// Empty strings in override are treated as "not set" and won't override non-empty values
+fn merge_node_configs(base: &NodeConfig, override_conf: &NodeConfig) -> NodeConfig {
+    NodeConfig {
+        network: NetworkConf {
+            ipv4_gateway: if override_conf.network.ipv4_gateway.is_empty() {
+                base.network.ipv4_gateway.clone()
+            } else {
+                override_conf.network.ipv4_gateway.clone()
+            },
+            ipv6_gateway: if override_conf.network.ipv6_gateway.is_empty() {
+                base.network.ipv6_gateway.clone()
+            } else {
+                override_conf.network.ipv6_gateway.clone()
+            },
+            dns_server: match &override_conf.network.dns_server {
+                Some(s) if !s.is_empty() => Some(s.clone()),
+                _ => base.network.dns_server.clone(),
+            },
+            interface_name: match &override_conf.network.interface_name {
+                Some(s) if !s.is_empty() => Some(s.clone()),
+                _ => base.network.interface_name.clone(),
+            },
+        },
+    }
 }
 
 /// Get the fully resolved TorConfig for a relay, merging global, node, and relay configs
