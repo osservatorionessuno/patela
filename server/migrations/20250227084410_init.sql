@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS relays
     id          INTEGER PRIMARY KEY NOT NULL,
     node_id	INTEGER             NOT NULL,
     cheese_id	INTEGER             NOT NULL,
-    date	TEXT                NOT NULL UNIQUE,
+    date	TEXT                NOT NULL,
     ip_v4       TEXT                NOT NULL UNIQUE,
     ip_v6       TEXT                NOT NULL UNIQUE,
     fingerprint TEXT,
