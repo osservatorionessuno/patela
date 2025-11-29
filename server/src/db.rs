@@ -867,19 +867,11 @@ pub async fn get_resolved_node_relays_conf(
     // Get all relays for this node
     let relays = get_relays_conf(pool, node_id).await?;
 
-    // Fetch global and node configs once to avoid redundant queries
-    let global_conf = get_global_tor_conf(pool).await?;
-    let node_conf = get_node_tor_conf(pool, node_id).await?;
-
     // Resolve configuration for each relay
     let mut resolved_relays = Vec::new();
     for relay in relays {
         // Merge global -> node -> relay configurations
-        let resolved_tor_conf = merge_tor_configs(
-            global_conf.as_ref(),
-            node_conf.as_ref(),
-            relay.tor_conf.as_ref(),
-        );
+        let resolved_tor_conf = get_resolved_relay_conf(pool, node_id, relay.id).await?;
 
         resolved_relays.push(ResolvedRelayRecord {
             id: relay.id,
