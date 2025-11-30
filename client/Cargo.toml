@@ -20,7 +20,7 @@ mnl = "0.2.3"
 netlink-packet-core = "0.8"
 netlink-packet-route = "0.25"
 netlink-proto = "0.12"
-nftnl = "0.8.0"
+nftnl = "0.9"
 patela-server = { path = "../server" }
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 rtnetlink = "0.18"

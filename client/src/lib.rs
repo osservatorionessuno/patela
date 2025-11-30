@@ -308,20 +308,20 @@ pub fn set_source_ip_by_process(
     let mut batch = Batch::new();
     //
     //// Create a netfilter table operating on both IPv4 and IPv6 (ProtoFamily::Inet)
-    let table = Table::new(&NFT_TABLE_NAME, ProtoFamily::Inet);
+    let table = Table::new(NFT_TABLE_NAME, ProtoFamily::Inet);
 
     //// Add the table to the batch with the `MsgType::Add` type, thus instructing netfilter to add
     //// this table under its `ProtoFamily::Inet` ruleset.
     batch.add(&table, nftnl::MsgType::Add);
 
-    let mut mangle_chain = Chain::new(&MANGLE_CHAIN_NAME, &table);
+    let mut mangle_chain = Chain::new(MANGLE_CHAIN_NAME, &table);
 
     mangle_chain.set_hook(nftnl::Hook::Out, MANGLE_CHAIN_PRIORITY);
     mangle_chain.set_type(nftnl::ChainType::Route);
     mangle_chain.set_policy(nftnl::Policy::Accept);
     batch.add(&mangle_chain, nftnl::MsgType::Add);
 
-    let mut nat_chain = Chain::new(&NAT_CHAIN_NAME, &table);
+    let mut nat_chain = Chain::new(NAT_CHAIN_NAME, &table);
     nat_chain.set_hook(nftnl::Hook::PostRouting, libc::NF_IP_PRI_NAT_SRC);
     nat_chain.set_type(nftnl::ChainType::Nat);
     nat_chain.set_policy(nftnl::Policy::Accept);
