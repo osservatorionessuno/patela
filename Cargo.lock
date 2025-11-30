@@ -507,6 +507,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 
 [[package]]
+name = "bincode"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
+dependencies = [
+ "bincode_derive",
+ "serde",
+ "unty",
+]
+
+[[package]]
+name = "bincode_derive"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
+dependencies = [
+ "virtue",
+]
+
+[[package]]
 name = "biscuit-auth"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2713,6 +2733,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "base64 0.22.1",
+ "bincode",
  "clap",
  "const-gen",
  "elliptic-curve 0.14.0-rc.17",
@@ -2727,11 +2748,12 @@ dependencies = [
  "netlink-proto",
  "nftnl",
  "patela-server",
+ "rand 0.8.5",
  "reqwest",
+ "rsa",
  "rtnetlink",
  "rustls-pemfile",
  "serde",
- "serde_bytes",
  "serde_json",
  "sha2 0.11.0-rc.3",
  "sysinfo",
@@ -3504,16 +3526,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde_bytes"
-version = "0.11.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
-dependencies = [
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -4462,6 +4474,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "unty"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
 name = "url"
 version = "2.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4496,6 +4514,12 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtue"
+version = "0.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "wait-timeout"
@@ -5239,13 +5263,3 @@ source = "git+https://github.com/tarcieri/ff?branch=rand_core%2Fv0.10.0-rc-2#470
 name = "group"
 version = "0.14.0-pre.0"
 source = "git+https://github.com/tarcieri/group?branch=rand_core%2Fv0.10.0-rc-2#d24a386b8fc60d6af5680a06f8e5d29bb0a00523"
-
-[[patch.unused]]
-name = "p521"
-version = "0.14.0-rc.1"
-source = "git+https://github.com/RustCrypto/elliptic-curves.git#16ab98fc5ac670e6a7b4e24f099995f48553bfee"
-
-[[patch.unused]]
-name = "sm2"
-version = "0.14.0-rc.1"
-source = "git+https://github.com/RustCrypto/elliptic-curves.git#16ab98fc5ac670e6a7b4e24f099995f48553bfee"

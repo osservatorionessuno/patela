@@ -9,6 +9,7 @@ aes = "0.9.0-rc.1"
 aes-gcm = "0.10.3"
 anyhow = "1.0.100"
 base64 = "0.22.1"
+bincode = { version = "2.0.1" }
 clap = { version = "4.5.51", features = ["derive"] }
 elliptic-curve = { version = "0.14.0-rc.16", features = ["alloc", "pkcs8", "arithmetic", "serde"] }
 etc-passwd = "0.2.2"
@@ -23,10 +24,10 @@ netlink-proto = "0.12"
 nftnl = "0.9"
 patela-server = { path = "../server" }
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+rsa = "0.9.9"
 rtnetlink = "0.18"
 rustls-pemfile = "2.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_bytes = "0.11.19"
 serde_json = "1.0.145"
 sha2 = { version = "0.11.0-rc.2", features = ["oid"] }
 sysinfo = { version = "0.37", features = ["serde"] }
@@ -36,6 +37,9 @@ tokio = { version = "1.48", features = ["full"] }
 tss-esapi = { git = "https://github.com/gibix/rust-tss-esapi", branch = "baloo/make-credentials", features = ["rustcrypto", "integration-tests", "serde", "abstraction", "p256"] }
 [build-dependencies]
 const-gen = "1.6.8"
+
+[dev-dependencies]
+rand = "0.8"
 
 [package.metadata.deb]
 maintainer = "Osservatorio Nessuno <admin@osservatorionessuno.org>"

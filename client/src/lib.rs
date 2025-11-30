@@ -1,6 +1,7 @@
 include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
 use crate::tpm::*;
+use bincode::{Decode, Encode};
 use etc_passwd::Passwd;
 use futures::TryStreamExt;
 use ipnetwork::IpNetwork;
@@ -11,6 +12,12 @@ use nftnl::{
     nftnl_sys::libc,
 };
 use patela_server::{HwSpecs, db::ResolvedRelayRecord};
+use rsa::{
+    BigUint,
+    pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey},
+    pkcs8::LineEnding,
+    traits::{PrivateKeyParts, PublicKeyParts},
+};
 use rtnetlink::{
     LinkUnspec, RouteMessageBuilder,
     packet_route::{
@@ -19,7 +26,6 @@ use rtnetlink::{
         link::{LinkAttribute, LinkExtentMask},
     },
 };
-use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::{CStr, CString},
@@ -41,6 +47,8 @@ const MANGLE_CHAIN_PRIORITY: i32 = libc::NF_IP_PRI_MANGLE;
 const NAT_CHAIN_NAME: &CStr = c"nat";
 pub const TOR_INSTANCE_LIB_DIR: &str = "/var/lib/tor-instances";
 const TOR_MASTER_KEY_NAME: &str = "ed25519_master_id_secret_key";
+const TOR_RSA_KEY_NAME: &str = "secret_id_key";
+const TOR_ED25519_HEADER: &[u8] = b"== ed25519v1-secret: type0 ==\x00\x00\x00";
 
 pub fn collect_specs() -> anyhow::Result<HwSpecs> {
     let sys = System::new_all();
@@ -417,11 +425,56 @@ fn send_and_process(batch: &FinalizedBatch) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode)]
 pub struct RelayKeyData {
-    pub instance_name: String,
-    #[serde(with = "serde_bytes")]
-    pub ed25519_master_id_secret_key: Vec<u8>,
+    pub i: usize,
+    pub ed: Vec<u8>,
+    pub p: Vec<u8>,
+    pub q: Vec<u8>,
+    pub e: Vec<u8>,
+}
+
+fn strip_ed25519_header(key_file_data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        key_file_data.len() == 96,
+        "Expected 96 bytes, got {}",
+        key_file_data.len()
+    );
+    anyhow::ensure!(
+        &key_file_data[..32] == TOR_ED25519_HEADER,
+        "Invalid ed25519 key header"
+    );
+    Ok(key_file_data[32..].to_vec())
+}
+
+fn add_ed25519_header(key_data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        key_data.len() == 64,
+        "Expected 64 bytes of key data, got {}",
+        key_data.len()
+    );
+    let mut result = Vec::with_capacity(96);
+    result.extend_from_slice(TOR_ED25519_HEADER);
+    result.extend_from_slice(key_data);
+    Ok(result)
+}
+
+fn rsa_pem_to_primes(data: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let rsa_key = rsa::RsaPrivateKey::from_pkcs1_pem(std::str::from_utf8(data)?)?;
+    let rsa_primes = rsa_key.primes();
+
+    let p = rsa_primes[0].to_bytes_be();
+    let q = rsa_primes[1].to_bytes_be();
+    let e = rsa_key.e().to_bytes_be();
+    Ok((p, q, e))
+}
+
+fn rsa_primes_to_pem(p: &[u8], q: &[u8], e: &[u8]) -> anyhow::Result<String> {
+    let p = BigUint::from_bytes_be(p);
+    let q = BigUint::from_bytes_be(q);
+    let e = BigUint::from_bytes_be(e);
+    let rsa_key = rsa::RsaPrivateKey::from_primes(vec![p, q], e)?;
+    Ok(rsa_key.to_pkcs1_pem(LineEnding::LF)?.to_string())
 }
 
 pub fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Vec<u8>> {
@@ -436,15 +489,22 @@ pub fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Ve
         let key_data = fs::read(&key_path)
             .map_err(|e| anyhow::anyhow!("Failed to read key for relay {}: {}", relay.name, e))?;
 
+        let rsa_path = keys_dir.join(TOR_RSA_KEY_NAME);
+        let rsa_data = fs::read(&rsa_path).map_err(|e| {
+            anyhow::anyhow!("Failed to read RSA key for relay {}: {}", relay.name, e)
+        })?;
+        let (p, q, e) = rsa_pem_to_primes(&rsa_data)?;
+
         relay_keys.push(RelayKeyData {
-            instance_name: relay.name.clone(),
-            ed25519_master_id_secret_key: key_data,
+            i: relay.id as usize, // :)
+            ed: strip_ed25519_header(&key_data)?,
+            p,
+            q,
+            e,
         });
     }
-    let json = serde_json::to_string(&relay_keys)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize backup to JSON: {}", e))?;
-
-    let bytes = json.into_bytes();
+    let bytes = bincode::encode_to_vec(&relay_keys, bincode::config::standard())
+        .map_err(|e| anyhow::anyhow!("Failed to serialize backup with bincode: {}", e))?;
 
     Ok(bytes)
 }
@@ -456,12 +516,10 @@ pub fn deserialize_relay_keys(data: &[u8]) -> anyhow::Result<Vec<RelayKeyData>> 
         .map(|pos| &data[..=pos])
         .unwrap_or(data);
 
-    let json_str = std::str::from_utf8(trimmed)
-        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in backup data: {}", e))?;
-
-    let backup: Vec<RelayKeyData> = serde_json::from_str(json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to deserialize backup data: {}", e))?;
-
+    let (backup, _): (Vec<RelayKeyData>, usize) =
+        bincode::decode_from_slice(trimmed, bincode::config::standard()).map_err(|e| {
+            anyhow::anyhow!("Failed to deserialize backup data with bincode, {}", e)
+        })?;
     Ok(backup)
 }
 
@@ -496,17 +554,27 @@ pub fn restore_tor_keys_from_tpm(
     let restored_keys = deserialize_relay_keys(&data)?;
 
     for relay in relays {
-        let key_data = restored_keys
+        let (key_data, rsa_data) = restored_keys
             .iter()
-            .find(|rk| rk.instance_name == relay.name)
-            .map(|rk| rk.ed25519_master_id_secret_key.clone())
-            .ok_or_else(|| anyhow::anyhow!("No backup found for relay {}", relay.name))?;
+            .find(|rk| rk.i == (relay.id as usize))
+            .ok_or_else(|| anyhow::anyhow!("No backup found for relay {}", relay.name))
+            .and_then(|rk| {
+                Ok((
+                    add_ed25519_header(&rk.ed)?,
+                    rsa_primes_to_pem(&rk.p, &rk.q, &rk.e)?,
+                ))
+            })?;
 
         let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
             .join(&relay.name)
             .join("keys");
 
         fs::create_dir_all(&keys_dir)?;
+
+        let rsa_path = keys_dir.join(TOR_RSA_KEY_NAME);
+        fs::write(&rsa_path, rsa_data).map_err(|e| {
+            anyhow::anyhow!("Failed to write RSA key for relay {}: {}", relay.name, e)
+        })?;
 
         let key_path = keys_dir.join(TOR_MASTER_KEY_NAME);
         fs::write(&key_path, key_data)
@@ -530,4 +598,302 @@ pub fn restore_tor_keys_from_tpm(
 
     println!("Successfully restored {} relay keys from TPM", relays.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsa::pkcs8::LineEnding;
+    use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey};
+
+    #[test]
+    fn test_strip_ed25519_header() {
+        // Create a valid 96-byte key with header
+        let mut key_data = Vec::new();
+        key_data.extend_from_slice(TOR_ED25519_HEADER);
+        key_data.extend_from_slice(&[0u8; 64]); // 64 bytes of key data
+
+        let result = strip_ed25519_header(&key_data).unwrap();
+
+        assert_eq!(result.len(), 64);
+        assert_eq!(result, vec![0u8; 64]);
+    }
+
+    #[test]
+    fn test_strip_ed25519_header_invalid_length() {
+        let key_data = vec![0u8; 50]; // Wrong length
+        let result = strip_ed25519_header(&key_data);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Expected 96 bytes")
+        );
+    }
+
+    #[test]
+    fn test_strip_ed25519_header_invalid_header() {
+        let key_data = vec![0u8; 96];
+        // Wrong header (not matching TOR_ED25519_HEADER)
+
+        let result = strip_ed25519_header(&key_data);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid ed25519 key header")
+        );
+    }
+
+    #[test]
+    fn test_add_ed25519_header() {
+        let key_data = vec![0xAB; 64];
+
+        let result = add_ed25519_header(&key_data).unwrap();
+
+        assert_eq!(result.len(), 96);
+        assert_eq!(&result[..32], TOR_ED25519_HEADER);
+        assert_eq!(&result[32..], &key_data[..]);
+    }
+
+    #[test]
+    fn test_add_ed25519_header_invalid_length() {
+        let key_data = vec![0u8; 50]; // Wrong length
+
+        let result = add_ed25519_header(&key_data);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Expected 64 bytes")
+        );
+    }
+
+    #[test]
+    fn test_ed25519_header_roundtrip() {
+        // Create original key with header
+        let mut original = Vec::new();
+        original.extend_from_slice(TOR_ED25519_HEADER);
+        original.extend_from_slice(&[0xAB; 64]);
+
+        // Strip header
+        let stripped = strip_ed25519_header(&original).unwrap();
+
+        // Add header back
+        let restored = add_ed25519_header(&stripped).unwrap();
+
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn test_rsa_pem_to_primes() {
+        let mut rng = rand::thread_rng();
+        let key = RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let pem = key.to_pkcs1_pem(LineEnding::LF).unwrap();
+
+        let (p, q, e) = rsa_pem_to_primes(pem.as_bytes()).unwrap();
+
+        // Check sizes are reasonable for 1024-bit RSA
+        assert!(p.len() >= 60 && p.len() <= 68, "p size: {}", p.len());
+        assert!(q.len() >= 60 && q.len() <= 68, "q size: {}", q.len());
+        assert!(!e.is_empty() && e.len() <= 8, "e size: {}", e.len());
+
+        // Verify we can reconstruct the key
+        let p_bigint = BigUint::from_bytes_be(&p);
+        let q_bigint = BigUint::from_bytes_be(&q);
+        let e_bigint = BigUint::from_bytes_be(&e);
+
+        let reconstructed = RsaPrivateKey::from_primes(vec![p_bigint, q_bigint], e_bigint).unwrap();
+
+        // Original and reconstructed should have same modulus
+        assert_eq!(key.n(), reconstructed.n());
+    }
+
+    #[test]
+    fn test_rsa_primes_to_pem() {
+        let mut rng = rand::thread_rng();
+        let key = RsaPrivateKey::new(&mut rng, 1024).unwrap();
+
+        let primes = key.primes();
+        let p = primes[0].to_bytes_be();
+        let q = primes[1].to_bytes_be();
+        let e = key.e().to_bytes_be();
+
+        let pem = rsa_primes_to_pem(&p, &q, &e).unwrap();
+
+        // Check it's valid PEM format
+        assert!(pem.starts_with("-----BEGIN RSA PRIVATE KEY-----"));
+        assert!(pem.ends_with("-----END RSA PRIVATE KEY-----\n"));
+
+        // Verify we can parse it back
+        let reconstructed = RsaPrivateKey::from_pkcs1_pem(&pem).unwrap();
+        assert_eq!(key.n(), reconstructed.n());
+    }
+
+    #[test]
+    fn test_rsa_roundtrip() {
+        let mut rng = rand::thread_rng();
+        let original_key = RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let original_pem = original_key.to_pkcs1_pem(LineEnding::LF).unwrap();
+
+        // Convert to primes
+        let (p, q, e) = rsa_pem_to_primes(original_pem.as_bytes()).unwrap();
+
+        // Convert back to PEM
+        let restored_pem = rsa_primes_to_pem(&p, &q, &e).unwrap();
+
+        // Parse both and compare modulus
+        let original = RsaPrivateKey::from_pkcs1_pem(&original_pem).unwrap();
+        let restored = RsaPrivateKey::from_pkcs1_pem(&restored_pem).unwrap();
+
+        assert_eq!(original.n(), restored.n());
+        assert_eq!(original.e(), restored.e());
+    }
+
+    #[test]
+    fn test_relay_key_data_serialization() {
+        let relay_data = RelayKeyData {
+            i: 42,
+            ed: vec![0xAB; 64],
+            p: vec![0xCD; 64],
+            q: vec![0xEF; 64],
+            e: vec![0x01, 0x00, 0x01], // Common RSA exponent 65537
+        };
+
+        let serialized = bincode::encode_to_vec(&relay_data, bincode::config::standard()).unwrap();
+
+        // Should be reasonably compact
+        assert!(
+            serialized.len() < 250,
+            "Serialized size: {}",
+            serialized.len()
+        );
+
+        let (deserialized, _): (RelayKeyData, usize) =
+            bincode::decode_from_slice(&serialized, bincode::config::standard()).unwrap();
+
+        assert_eq!(deserialized.i, relay_data.i);
+        assert_eq!(deserialized.ed, relay_data.ed);
+        assert_eq!(deserialized.p, relay_data.p);
+        assert_eq!(deserialized.q, relay_data.q);
+        assert_eq!(deserialized.e, relay_data.e);
+    }
+
+    #[test]
+    fn test_deserialize_relay_keys_with_padding() {
+        let relay_data = RelayKeyData {
+            i: 1,
+            ed: vec![0x11; 64],
+            p: vec![0x22; 64],
+            q: vec![0x33; 64],
+            e: vec![0x01, 0x00, 0x01],
+        };
+
+        let mut serialized =
+            bincode::encode_to_vec(vec![relay_data], bincode::config::standard()).unwrap();
+
+        // Add padding
+        serialized.resize(2048, 0);
+
+        // Should still deserialize correctly
+        let deserialized = deserialize_relay_keys(&serialized).unwrap();
+
+        assert_eq!(deserialized.len(), 1);
+        assert_eq!(deserialized[0].i, 1);
+        assert_eq!(deserialized[0].ed, vec![0x11; 64]);
+    }
+
+    #[test]
+    fn test_deserialize_relay_keys_multiple() {
+        let relay_data1 = RelayKeyData {
+            i: 1,
+            ed: vec![0x11; 64],
+            p: vec![0x22; 64],
+            q: vec![0x33; 64],
+            e: vec![0x01, 0x00, 0x01],
+        };
+
+        let relay_data2 = RelayKeyData {
+            i: 2,
+            ed: vec![0xAA; 64],
+            p: vec![0xBB; 64],
+            q: vec![0xCC; 64],
+            e: vec![0x01, 0x00, 0x01],
+        };
+
+        let serialized =
+            bincode::encode_to_vec(vec![relay_data1, relay_data2], bincode::config::standard())
+                .unwrap();
+
+        let deserialized = deserialize_relay_keys(&serialized).unwrap();
+
+        assert_eq!(deserialized.len(), 2);
+        assert_eq!(deserialized[0].i, 1);
+        assert_eq!(deserialized[1].i, 2);
+        assert_eq!(deserialized[0].ed, vec![0x11; 64]);
+        assert_eq!(deserialized[1].ed, vec![0xAA; 64]);
+    }
+
+    #[test]
+    fn test_deserialize_empty_data() {
+        let data = vec![0u8; 100];
+
+        let deserialized = deserialize_relay_keys(&data).unwrap();
+        assert!(deserialized.is_empty());
+    }
+
+    #[test]
+    fn test_serialization_size_estimate() {
+        // Test with realistic 1024-bit RSA components
+        let mut rng = rand::thread_rng();
+        let key = RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let primes = key.primes();
+
+        let relay_data = RelayKeyData {
+            i: 1,
+            ed: vec![0xAB; 64],
+            p: primes[0].to_bytes_be(),
+            q: primes[1].to_bytes_be(),
+            e: key.e().to_bytes_be(),
+        };
+
+        let serialized = bincode::encode_to_vec(&relay_data, bincode::config::standard()).unwrap();
+
+        println!("Single relay serialized size: {} bytes", serialized.len());
+
+        // Should be around 210-220 bytes
+        assert!(
+            serialized.len() < 250,
+            "Size too large: {}",
+            serialized.len()
+        );
+        assert!(
+            serialized.len() > 180,
+            "Size suspiciously small: {}",
+            serialized.len()
+        );
+
+        // Test 10 relays
+        let four_relays = vec![&relay_data; 10];
+        let serialized_four =
+            bincode::encode_to_vec(&four_relays, bincode::config::standard()).unwrap();
+
+        println!(
+            "Ten relays serialized size: {} bytes",
+            serialized_four.len()
+        );
+
+        // Should fit in 1 NV index (2048 bytes)
+        assert!(
+            serialized_four.len() < 2048,
+            "Ten relays too large: {}",
+            serialized_four.len()
+        );
+    }
 }
