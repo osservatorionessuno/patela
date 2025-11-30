@@ -16,6 +16,7 @@ use patela_client::{
 };
 use patela_server::{NodeConfig, db::ResolvedRelayRecord};
 use reqwest::StatusCode;
+use sysinfo::System;
 use systemctl::SystemCtl;
 use tss_esapi::{
     Context, TctiNameConf,
@@ -101,6 +102,17 @@ async fn main() -> anyhow::Result<()> {
         Commands::Tpm { cmd } => cmd_tpm(cmd, config.tpm2).await,
         Commands::Net { cmd } => cmd_net(cmd).await,
     }
+}
+
+fn set_cgroup(relay: &ResolvedRelayRecord, cpu: usize) -> anyhow::Result<()> {
+    let dir = format!("/etc/systemd/system/tor@{}.service.d", relay.name);
+    fs::create_dir_all(&dir)?;
+
+    let file = format!("{}/slice.conf", dir);
+    let content = systemd_slice(relay, cpu);
+    fs::write(&file, content)?;
+
+    Ok(())
 }
 
 // Yes this is big, but that's life
@@ -261,7 +273,7 @@ async fn cmd_start(
     println!("Fetch relays conf");
 
     // Get tor relay conf
-    let relays = client
+    let mut relays = client
         .get(format!("{}/private/config/node", server_url))
         .bearer_auth(&session_token)
         .send()
@@ -270,13 +282,19 @@ async fn cmd_start(
         .json::<Vec<ResolvedRelayRecord>>()
         .await?;
 
+    // sort by id so we can assign each time the same CPU affinity
+    relays.sort_by_key(|r| r.id);
+
     for relay in relays.iter() {
         println!("{}", relay);
     }
 
     println!("\n\nConfigure relays...");
 
-    for relay in relays.iter() {
+    let sys = System::new_all();
+    let num_cpus = sys.cpus().len();
+
+    for (idx, relay) in relays.iter().enumerate() {
         println!("Configure tor relay {}", relay.name);
 
         // NOTE: Replace bash script with useradd and template
@@ -290,6 +308,10 @@ async fn cmd_start(
             format!("/etc/tor/instances/{}/torrc", relay.name),
             conf_file,
         )?;
+
+        // support wrap around if we ever decide to deploy more relays than CPUs
+        let cpu = idx % num_cpus;
+        set_cgroup(relay, cpu).context("unable to setup systemd slice for relay")?;
     }
 
     if skip_net {
