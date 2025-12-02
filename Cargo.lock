@@ -2748,6 +2748,7 @@ dependencies = [
  "netlink-proto",
  "nftnl",
  "patela-server",
+ "pem",
  "rand 0.8.5",
  "reqwest",
  "rsa",
@@ -2801,6 +2802,16 @@ dependencies = [
  "tokio",
  "tss-esapi",
  "x509-parser",
+]
+
+[[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
 ]
 
 [[package]]

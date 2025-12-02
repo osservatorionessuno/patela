@@ -23,6 +23,7 @@ netlink-packet-route = "0.25"
 netlink-proto = "0.12"
 nftnl = "0.9"
 patela-server = { path = "../server" }
+pem = "3.0.6"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 rsa = "0.9.9"
 rtnetlink = "0.18"

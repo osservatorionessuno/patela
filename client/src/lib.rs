@@ -1,6 +1,7 @@
 include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
 use crate::tpm::*;
+use anyhow::Context;
 use bincode::{Decode, Encode};
 use etc_passwd::Passwd;
 use futures::TryStreamExt;
@@ -12,10 +13,10 @@ use nftnl::{
     nftnl_sys::libc,
 };
 use patela_server::{HwSpecs, db::ResolvedRelayRecord};
+use pem::{EncodeConfig, Pem, encode_config};
 use rsa::{
     BigUint,
     pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey},
-    pkcs8::LineEnding,
     traits::PrivateKeyParts,
 };
 use rtnetlink::{
@@ -461,7 +462,10 @@ fn add_ed25519_header(key_data: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 fn rsa_pem_to_primes(data: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-    let rsa_key = rsa::RsaPrivateKey::from_pkcs1_pem(std::str::from_utf8(data)?)?;
+    let pem = pem::parse(data).context("Failed to parse PEM file")?;
+
+    let rsa_key = rsa::RsaPrivateKey::from_pkcs1_der(pem.contents())
+        .context("Failed to parse RSA key from DER")?;
     let rsa_primes = rsa_key.primes();
 
     let p = rsa_primes[0].to_bytes_be();
@@ -469,12 +473,26 @@ fn rsa_pem_to_primes(data: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     Ok((p, q))
 }
 
+// TOR RSA PEM format:
+// - base64 encoded DER
+// - 64 characters lines
+// - enclosed by RSA key header and footer
+fn tor_format_rsa_key(key: &rsa::RsaPrivateKey) -> String {
+    let der = key.to_pkcs1_der().unwrap();
+    let pem = Pem::new("RSA PRIVATE KEY", der.as_bytes());
+    let config = EncodeConfig::new()
+        .set_line_wrap(64)
+        .set_line_ending(pem::LineEnding::LF);
+    encode_config(&pem, config)
+}
+
 fn rsa_primes_to_pem(p: &[u8], q: &[u8]) -> anyhow::Result<String> {
     let p = BigUint::from_bytes_be(p);
     let q = BigUint::from_bytes_be(q);
     let rsa_key =
         rsa::RsaPrivateKey::from_primes(vec![p, q], BigUint::from_bytes_be(TOR_RSA_EXPONENT))?;
-    Ok(rsa_key.to_pkcs1_pem(LineEnding::LF)?.to_string())
+    let pem = tor_format_rsa_key(&rsa_key);
+    Ok(pem)
 }
 
 pub fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Vec<u8>> {
@@ -501,6 +519,7 @@ pub fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Ve
             p,
             q,
         });
+        println!("Backed up relay: {}", relay.name);
     }
     let bytes = bincode::encode_to_vec(&relay_keys, bincode::config::standard())
         .map_err(|e| anyhow::anyhow!("Failed to serialize backup with bincode: {}", e))?;
