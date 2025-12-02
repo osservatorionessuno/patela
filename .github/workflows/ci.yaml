@@ -55,10 +55,9 @@ jobs:
           command: clippy
           args: --all-targets --all-features
 
-  build:
+  test:
     runs-on: ubuntu-latest
     container: debian:13-slim
-    needs: [lint]
     steps:
       - uses: actions/checkout@v5
       - name: Install dependencies
@@ -90,4 +89,4 @@ jobs:
       - name: Build
         uses: actions-rs/cargo@v1
         with:
-          command: build
+          command: test
