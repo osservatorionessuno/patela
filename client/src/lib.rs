@@ -16,7 +16,7 @@ use rsa::{
     BigUint,
     pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey},
     pkcs8::LineEnding,
-    traits::{PrivateKeyParts, PublicKeyParts},
+    traits::PrivateKeyParts,
 };
 use rtnetlink::{
     LinkUnspec, RouteMessageBuilder,
@@ -49,6 +49,8 @@ pub const TOR_INSTANCE_LIB_DIR: &str = "/var/lib/tor-instances";
 const TOR_MASTER_KEY_NAME: &str = "ed25519_master_id_secret_key";
 const TOR_RSA_KEY_NAME: &str = "secret_id_key";
 const TOR_ED25519_HEADER: &[u8] = b"== ed25519v1-secret: type0 ==\x00\x00\x00";
+// 65537, see: https://spec.torproject.org/tor-spec/preliminaries.html#ciphers
+const TOR_RSA_EXPONENT: &[u8] = &[0x01, 0x00, 0x01];
 
 pub fn collect_specs() -> anyhow::Result<HwSpecs> {
     let sys = System::new_all();
@@ -431,7 +433,6 @@ pub struct RelayKeyData {
     pub ed: Vec<u8>,
     pub p: Vec<u8>,
     pub q: Vec<u8>,
-    pub e: Vec<u8>,
 }
 
 fn strip_ed25519_header(key_file_data: &[u8]) -> anyhow::Result<Vec<u8>> {
@@ -459,21 +460,20 @@ fn add_ed25519_header(key_data: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(result)
 }
 
-fn rsa_pem_to_primes(data: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+fn rsa_pem_to_primes(data: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let rsa_key = rsa::RsaPrivateKey::from_pkcs1_pem(std::str::from_utf8(data)?)?;
     let rsa_primes = rsa_key.primes();
 
     let p = rsa_primes[0].to_bytes_be();
     let q = rsa_primes[1].to_bytes_be();
-    let e = rsa_key.e().to_bytes_be();
-    Ok((p, q, e))
+    Ok((p, q))
 }
 
-fn rsa_primes_to_pem(p: &[u8], q: &[u8], e: &[u8]) -> anyhow::Result<String> {
+fn rsa_primes_to_pem(p: &[u8], q: &[u8]) -> anyhow::Result<String> {
     let p = BigUint::from_bytes_be(p);
     let q = BigUint::from_bytes_be(q);
-    let e = BigUint::from_bytes_be(e);
-    let rsa_key = rsa::RsaPrivateKey::from_primes(vec![p, q], e)?;
+    let rsa_key =
+        rsa::RsaPrivateKey::from_primes(vec![p, q], BigUint::from_bytes_be(TOR_RSA_EXPONENT))?;
     Ok(rsa_key.to_pkcs1_pem(LineEnding::LF)?.to_string())
 }
 
@@ -493,14 +493,13 @@ pub fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Ve
         let rsa_data = fs::read(&rsa_path).map_err(|e| {
             anyhow::anyhow!("Failed to read RSA key for relay {}: {}", relay.name, e)
         })?;
-        let (p, q, e) = rsa_pem_to_primes(&rsa_data)?;
+        let (p, q) = rsa_pem_to_primes(&rsa_data)?;
 
         relay_keys.push(RelayKeyData {
             i: relay.id as usize, // :)
             ed: strip_ed25519_header(&key_data)?,
             p,
             q,
-            e,
         });
     }
     let bytes = bincode::encode_to_vec(&relay_keys, bincode::config::standard())
@@ -561,7 +560,7 @@ pub fn restore_tor_keys_from_tpm(
             .and_then(|rk| {
                 Ok((
                     add_ed25519_header(&rk.ed)?,
-                    rsa_primes_to_pem(&rk.p, &rk.q, &rk.e)?,
+                    rsa_primes_to_pem(&rk.p, &rk.q)?,
                 ))
             })?;
 
@@ -604,7 +603,7 @@ pub fn restore_tor_keys_from_tpm(
 mod tests {
     use super::*;
     use rsa::pkcs8::LineEnding;
-    use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey};
+    use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, traits::PublicKeyParts};
 
     #[test]
     fn test_strip_ed25519_header() {
@@ -694,20 +693,20 @@ mod tests {
     #[test]
     fn test_rsa_pem_to_primes() {
         let mut rng = rand::thread_rng();
-        let key = RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let e_bigint = BigUint::from_bytes_be(TOR_RSA_EXPONENT);
+        let key = RsaPrivateKey::new_with_exp(&mut rng, 1024, &e_bigint).unwrap();
         let pem = key.to_pkcs1_pem(LineEnding::LF).unwrap();
 
-        let (p, q, e) = rsa_pem_to_primes(pem.as_bytes()).unwrap();
+        let (p, q) = rsa_pem_to_primes(pem.as_bytes()).unwrap();
 
         // Check sizes are reasonable for 1024-bit RSA
         assert!(p.len() >= 60 && p.len() <= 68, "p size: {}", p.len());
         assert!(q.len() >= 60 && q.len() <= 68, "q size: {}", q.len());
-        assert!(!e.is_empty() && e.len() <= 8, "e size: {}", e.len());
 
         // Verify we can reconstruct the key
         let p_bigint = BigUint::from_bytes_be(&p);
         let q_bigint = BigUint::from_bytes_be(&q);
-        let e_bigint = BigUint::from_bytes_be(&e);
+        let e_bigint = BigUint::from_bytes_be(TOR_RSA_EXPONENT);
 
         let reconstructed = RsaPrivateKey::from_primes(vec![p_bigint, q_bigint], e_bigint).unwrap();
 
@@ -718,14 +717,14 @@ mod tests {
     #[test]
     fn test_rsa_primes_to_pem() {
         let mut rng = rand::thread_rng();
-        let key = RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let e_bigint = BigUint::from_bytes_be(TOR_RSA_EXPONENT);
+        let key = RsaPrivateKey::new_with_exp(&mut rng, 1024, &e_bigint).unwrap();
 
         let primes = key.primes();
         let p = primes[0].to_bytes_be();
         let q = primes[1].to_bytes_be();
-        let e = key.e().to_bytes_be();
 
-        let pem = rsa_primes_to_pem(&p, &q, &e).unwrap();
+        let pem = rsa_primes_to_pem(&p, &q).unwrap();
 
         // Check it's valid PEM format
         assert!(pem.starts_with("-----BEGIN RSA PRIVATE KEY-----"));
@@ -739,21 +738,21 @@ mod tests {
     #[test]
     fn test_rsa_roundtrip() {
         let mut rng = rand::thread_rng();
-        let original_key = RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let e_bigint = BigUint::from_bytes_be(TOR_RSA_EXPONENT);
+        let original_key = RsaPrivateKey::new_with_exp(&mut rng, 1024, &e_bigint).unwrap();
         let original_pem = original_key.to_pkcs1_pem(LineEnding::LF).unwrap();
 
         // Convert to primes
-        let (p, q, e) = rsa_pem_to_primes(original_pem.as_bytes()).unwrap();
+        let (p, q) = rsa_pem_to_primes(original_pem.as_bytes()).unwrap();
 
         // Convert back to PEM
-        let restored_pem = rsa_primes_to_pem(&p, &q, &e).unwrap();
+        let restored_pem = rsa_primes_to_pem(&p, &q).unwrap();
 
         // Parse both and compare modulus
         let original = RsaPrivateKey::from_pkcs1_pem(&original_pem).unwrap();
         let restored = RsaPrivateKey::from_pkcs1_pem(&restored_pem).unwrap();
 
         assert_eq!(original.n(), restored.n());
-        assert_eq!(original.e(), restored.e());
     }
 
     #[test]
@@ -763,7 +762,6 @@ mod tests {
             ed: vec![0xAB; 64],
             p: vec![0xCD; 64],
             q: vec![0xEF; 64],
-            e: vec![0x01, 0x00, 0x01], // Common RSA exponent 65537
         };
 
         let serialized = bincode::encode_to_vec(&relay_data, bincode::config::standard()).unwrap();
@@ -782,7 +780,6 @@ mod tests {
         assert_eq!(deserialized.ed, relay_data.ed);
         assert_eq!(deserialized.p, relay_data.p);
         assert_eq!(deserialized.q, relay_data.q);
-        assert_eq!(deserialized.e, relay_data.e);
     }
 
     #[test]
@@ -792,7 +789,6 @@ mod tests {
             ed: vec![0x11; 64],
             p: vec![0x22; 64],
             q: vec![0x33; 64],
-            e: vec![0x01, 0x00, 0x01],
         };
 
         let mut serialized =
@@ -816,7 +812,6 @@ mod tests {
             ed: vec![0x11; 64],
             p: vec![0x22; 64],
             q: vec![0x33; 64],
-            e: vec![0x01, 0x00, 0x01],
         };
 
         let relay_data2 = RelayKeyData {
@@ -824,7 +819,6 @@ mod tests {
             ed: vec![0xAA; 64],
             p: vec![0xBB; 64],
             q: vec![0xCC; 64],
-            e: vec![0x01, 0x00, 0x01],
         };
 
         let serialized =
@@ -852,7 +846,8 @@ mod tests {
     fn test_serialization_size_estimate() {
         // Test with realistic 1024-bit RSA components
         let mut rng = rand::thread_rng();
-        let key = RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let e_bigint = BigUint::from_bytes_be(TOR_RSA_EXPONENT);
+        let key = RsaPrivateKey::new_with_exp(&mut rng, 1024, &e_bigint).unwrap();
         let primes = key.primes();
 
         let relay_data = RelayKeyData {
@@ -860,7 +855,6 @@ mod tests {
             ed: vec![0xAB; 64],
             p: primes[0].to_bytes_be(),
             q: primes[1].to_bytes_be(),
-            e: key.e().to_bytes_be(),
         };
 
         let serialized = bincode::encode_to_vec(&relay_data, bincode::config::standard()).unwrap();
