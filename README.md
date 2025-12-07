@@ -534,7 +534,7 @@ laptop and run in a debian bookworm vm. The two glibc are incompatible but with
 zig you need just to run:
 
 ```console
-cargo zigbuild --target x86_64-unknown-linux-gnu.2.36
+cargo zigbuild --target x86_64-unknown-linux-gnu.2.41
 ```
 
 To test with qemu/libvirt you can start with a virsh example in
