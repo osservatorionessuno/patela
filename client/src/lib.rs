@@ -55,7 +55,7 @@ const TOR_RSA_EXPONENT: &[u8] = &[0x01, 0x00, 0x01];
 
 pub fn collect_specs() -> anyhow::Result<HwSpecs> {
     let sys = System::new_all();
-    let cpu = sys.cpus().first().unwrap();
+    let cpu = sys.cpus().first().context("Unable to get CPU info")?;
 
     Ok(HwSpecs {
         n_cpus: sys.cpus().len(),
@@ -63,6 +63,22 @@ pub fn collect_specs() -> anyhow::Result<HwSpecs> {
         cpu_freqz: cpu.frequency(),
         memory: sys.total_memory(),
     })
+}
+
+pub fn systemd_slice(relay: &ResolvedRelayRecord, cpu: usize) -> String {
+    let slice_name = format!("tor-{}.slice", relay.name);
+    format!(
+        "[Unit]\n\
+         Description=Systemd slice for Tor relay {name}\n\n\
+         [Service]\n\
+         Slice={slice}\n\
+         CPUAffinity={cpu}\n\
+         CPUAccounting=yes\n\
+         MemoryAccounting=yes\n",
+        name = relay.name,
+        slice = slice_name,
+        cpu = cpu,
+    )
 }
 
 /// Generate torrc from ResolvedRelayRecord
