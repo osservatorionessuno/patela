@@ -12,7 +12,7 @@ use nftnl::{
     nft_expr,
     nftnl_sys::libc,
 };
-use patela_server::{HwSpecs, db::ResolvedRelayRecord};
+use patela_server::{HwSpecs, db::ResolvedRelayRecord, tor_config::TorValue};
 use pem::{EncodeConfig, Pem, encode_config};
 use rsa::{
     BigUint,
@@ -79,6 +79,52 @@ pub fn systemd_slice(relay: &ResolvedRelayRecord, cpu: usize) -> String {
         slice = slice_name,
         cpu = cpu,
     )
+}
+
+/// Find the first private IPv4 address from all network interfaces
+pub async fn find_private_ip(handle: &rtnetlink::Handle) -> anyhow::Result<Ipv4Addr> {
+    let links = dump_links(handle).await?;
+
+    for (link_index, _) in links {
+        let addresses = dump_addresses(handle, link_index).await?;
+
+        for addr in addresses {
+            if let IpAddr::V4(ipv4) = addr {
+                // Check if it's a private IP address
+                if ipv4.is_private() {
+                    return Ok(ipv4);
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("No private IPv4 address found")
+}
+
+/// Rewrite MetricsPort directive to use the specified IP address with port calculated from public IP's last octet
+pub fn rewrite_metrics_port(
+    relay: &mut patela_server::db::ResolvedRelayRecord,
+    metrics_ip: &Ipv4Addr,
+) -> anyhow::Result<()> {
+    if let Some(_metrics_ports) = relay.resolved_tor_conf.directives.get("MetricsPort") {
+        // Extract last octet from public IPv4 address
+        let public_ip: Ipv4Addr = relay.ip_v4.parse()?;
+        let octets = public_ip.octets();
+        let last_octet = octets[3] as u16;
+
+        // Calculate port: 10000 + last octet
+        let metrics_port = 10000 + last_octet;
+
+        // Rewrite MetricsPort to private_ip:calculated_port
+        let rewritten_ports = vec![TorValue::String(format!("{}:{}", metrics_ip, metrics_port))];
+
+        relay
+            .resolved_tor_conf
+            .directives
+            .insert("MetricsPort".to_string(), rewritten_ports);
+    }
+
+    Ok(())
 }
 
 /// Generate torrc from ResolvedRelayRecord

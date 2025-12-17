@@ -294,7 +294,13 @@ async fn cmd_start(
     let sys = System::new_all();
     let num_cpus = sys.cpus().len();
 
-    for (idx, relay) in relays.iter().enumerate() {
+    // Find private IP address for MetricsPort binding
+    let (connection, net_handle, _) = rtnetlink::new_connection()?;
+    tokio::spawn(connection);
+    let metrics_ip = find_private_ip(&net_handle).await?;
+    println!("Using {} for MetricsPort binding\n", metrics_ip);
+
+    for (idx, relay) in relays.iter_mut().enumerate() {
         println!("Configure tor relay {}", relay.name);
 
         // NOTE: Replace bash script with useradd and template
@@ -303,6 +309,7 @@ async fn cmd_start(
             .args(["/usr/sbin/tor-instance-create", &relay.name])
             .status()?;
 
+        rewrite_metrics_port(relay, &metrics_ip)?;
         let conf_file = generate_torrc(relay)?;
         fs::write(
             format!("/etc/tor/instances/{}/torrc", relay.name),
