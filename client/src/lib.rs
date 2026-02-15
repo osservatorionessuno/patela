@@ -50,6 +50,8 @@ pub const TOR_INSTANCE_LIB_DIR: &str = "/var/lib/tor-instances";
 const TOR_MASTER_KEY_NAME: &str = "ed25519_master_id_secret_key";
 const TOR_RSA_KEY_NAME: &str = "secret_id_key";
 const TOR_ED25519_HEADER: &[u8] = b"== ed25519v1-secret: type0 ==\x00\x00\x00";
+const TOR_FAMILY_KEY_HEADER: &[u8] = b"== ed25519v1-secret: fmly-id ==\x00";
+const TOR_FAMILY_KEY_NAME: &str = "osservatorionessuno.secret_family_key";
 // 65537, see: https://spec.torproject.org/tor-spec/preliminaries.html#ciphers
 const TOR_RSA_EXPONENT: &[u8] = &[0x01, 0x00, 0x01];
 
@@ -490,8 +492,37 @@ fn send_and_process(batch: &FinalizedBatch) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Default)]
+pub enum Ed25519KeyType {
+    /// ed25519v1-secret: type0 — the relay master identity key
+    #[default]
+    Type0 = 0,
+    /// ed25519v1-secret: fmly-id — the family identity key
+    FamilyId = 1,
+}
+
+impl Ed25519KeyType {
+    pub fn header(&self) -> &'static [u8] {
+        match self {
+            Ed25519KeyType::Type0 => TOR_ED25519_HEADER,
+            Ed25519KeyType::FamilyId => TOR_FAMILY_KEY_HEADER,
+        }
+    }
+
+    pub fn from_header(header: &[u8]) -> anyhow::Result<Self> {
+        if header == TOR_ED25519_HEADER {
+            Ok(Ed25519KeyType::Type0)
+        } else if header == TOR_FAMILY_KEY_HEADER {
+            Ok(Ed25519KeyType::FamilyId)
+        } else {
+            anyhow::bail!("Unknown ed25519 key header")
+        }
+    }
+}
+
 #[derive(Debug, Encode, Decode)]
 pub struct RelayKeyData {
+    pub t: Ed25519KeyType,
     pub i: usize,
     pub ed: Vec<u8>,
     pub p: Vec<u8>,
@@ -499,26 +530,34 @@ pub struct RelayKeyData {
 }
 
 fn strip_ed25519_header(key_file_data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    strip_ed25519_key(key_file_data, TOR_ED25519_HEADER)
+}
+
+fn strip_family_key_header(key_file_data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    strip_ed25519_key(key_file_data, TOR_FAMILY_KEY_HEADER)
+}
+
+fn strip_ed25519_key(key_file_data: &[u8], expected_header: &[u8]) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(
         key_file_data.len() == 96,
         "Expected 96 bytes, got {}",
         key_file_data.len()
     );
     anyhow::ensure!(
-        &key_file_data[..32] == TOR_ED25519_HEADER,
+        &key_file_data[..32] == expected_header,
         "Invalid ed25519 key header"
     );
     Ok(key_file_data[32..].to_vec())
 }
 
-fn add_ed25519_header(key_data: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn add_ed25519_header(key_data: &[u8], key_type: &Ed25519KeyType) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(
         key_data.len() == 64,
         "Expected 64 bytes of key data, got {}",
         key_data.len()
     );
     let mut result = Vec::with_capacity(96);
-    result.extend_from_slice(TOR_ED25519_HEADER);
+    result.extend_from_slice(key_type.header());
     result.extend_from_slice(key_data);
     Ok(result)
 }
@@ -560,6 +599,26 @@ fn rsa_primes_to_pem(p: &[u8], q: &[u8]) -> anyhow::Result<String> {
 pub fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Vec<u8>> {
     let mut relay_keys = Vec::new();
 
+    // Backup the family key from the first relay's keys dir (shared across all relays)
+    if let Some(first_relay) = relays.first() {
+        let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
+            .join(&first_relay.name)
+            .join("keys");
+        let family_key_path = keys_dir.join(TOR_FAMILY_KEY_NAME);
+        if family_key_path.exists() {
+            let family_key_data = fs::read(&family_key_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read family key: {}", e))?;
+            relay_keys.push(RelayKeyData {
+                i: usize::MAX,
+                ed: strip_family_key_header(&family_key_data)?,
+                p: Vec::new(),
+                q: Vec::new(),
+                t: Ed25519KeyType::FamilyId,
+            });
+            println!("Backed up family key");
+        }
+    }
+
     for relay in relays {
         let keys_dir = Path::new(&TOR_INSTANCE_LIB_DIR)
             .join(&relay.name)
@@ -580,6 +639,7 @@ pub fn serialize_relay_keys(relays: &[ResolvedRelayRecord]) -> anyhow::Result<Ve
             ed: strip_ed25519_header(&key_data)?,
             p,
             q,
+            t: Ed25519KeyType::Type0,
         });
         println!("Backed up relay: {}", relay.name);
     }
@@ -633,14 +693,19 @@ pub fn restore_tor_keys_from_tpm(
     let data = nv_read_data(ctx, nv_handle)?;
     let restored_keys = deserialize_relay_keys(&data)?;
 
+    // Restore family key to all relay key dirs
+    let family_key = restored_keys
+        .iter()
+        .find(|rk| rk.t == Ed25519KeyType::FamilyId);
+
     for relay in relays {
         let (key_data, rsa_data) = restored_keys
             .iter()
-            .find(|rk| rk.i == (relay.id as usize))
+            .find(|rk| rk.i == (relay.id as usize) && rk.t == Ed25519KeyType::Type0)
             .ok_or_else(|| anyhow::anyhow!("No backup found for relay {}", relay.name))
             .and_then(|rk| {
                 Ok((
-                    add_ed25519_header(&rk.ed)?,
+                    add_ed25519_header(&rk.ed, &rk.t)?,
                     rsa_primes_to_pem(&rk.p, &rk.q)?,
                 ))
             })?;
@@ -659,6 +724,14 @@ pub fn restore_tor_keys_from_tpm(
         let key_path = keys_dir.join(TOR_MASTER_KEY_NAME);
         fs::write(&key_path, key_data)
             .map_err(|e| anyhow::anyhow!("Failed to write key for relay {}: {}", relay.name, e))?;
+
+        if let Some(fk) = family_key {
+            let family_key_data = add_ed25519_header(&fk.ed, &Ed25519KeyType::FamilyId)?;
+            let family_key_path = keys_dir.join(TOR_FAMILY_KEY_NAME);
+            fs::write(&family_key_path, family_key_data).map_err(|e| {
+                anyhow::anyhow!("Failed to write family key for relay {}: {}", relay.name, e)
+            })?;
+        }
 
         let uid = Passwd::from_name(CString::new(format!("_tor-{}", &relay.name))?)?
             .ok_or_else(|| anyhow::anyhow!("User _tor-{} not found", relay.name))?
@@ -733,7 +806,7 @@ mod tests {
     fn test_add_ed25519_header() {
         let key_data = vec![0xAB; 64];
 
-        let result = add_ed25519_header(&key_data).unwrap();
+        let result = add_ed25519_header(&key_data, &Ed25519KeyType::Type0).unwrap();
 
         assert_eq!(result.len(), 96);
         assert_eq!(&result[..32], TOR_ED25519_HEADER);
@@ -744,7 +817,7 @@ mod tests {
     fn test_add_ed25519_header_invalid_length() {
         let key_data = vec![0u8; 50]; // Wrong length
 
-        let result = add_ed25519_header(&key_data);
+        let result = add_ed25519_header(&key_data, &Ed25519KeyType::Type0);
 
         assert!(result.is_err());
         assert!(
@@ -766,7 +839,7 @@ mod tests {
         let stripped = strip_ed25519_header(&original).unwrap();
 
         // Add header back
-        let restored = add_ed25519_header(&stripped).unwrap();
+        let restored = add_ed25519_header(&stripped, &Ed25519KeyType::Type0).unwrap();
 
         assert_eq!(original, restored);
     }
@@ -843,6 +916,7 @@ mod tests {
             ed: vec![0xAB; 64],
             p: vec![0xCD; 64],
             q: vec![0xEF; 64],
+            t: Ed25519KeyType::Type0,
         };
 
         let serialized = bincode::encode_to_vec(&relay_data, bincode::config::standard()).unwrap();
@@ -870,6 +944,7 @@ mod tests {
             ed: vec![0x11; 64],
             p: vec![0x22; 64],
             q: vec![0x33; 64],
+            t: Ed25519KeyType::FamilyId,
         };
 
         let mut serialized =
@@ -884,6 +959,46 @@ mod tests {
         assert_eq!(deserialized.len(), 1);
         assert_eq!(deserialized[0].i, 1);
         assert_eq!(deserialized[0].ed, vec![0x11; 64]);
+        assert_eq!(deserialized[0].t, Ed25519KeyType::FamilyId);
+    }
+
+    #[test]
+    fn test_deserialize_relay_keys_with_family_and_type0() {
+        let family_key = RelayKeyData {
+            i: usize::MAX,
+            ed: vec![0xFF; 64],
+            p: Vec::new(),
+            q: Vec::new(),
+            t: Ed25519KeyType::FamilyId,
+        };
+
+        let relay_data = RelayKeyData {
+            i: 1,
+            ed: vec![0x11; 64],
+            p: vec![0x22; 64],
+            q: vec![0x33; 64],
+            t: Ed25519KeyType::Type0,
+        };
+
+        let serialized =
+            bincode::encode_to_vec(vec![family_key, relay_data], bincode::config::standard())
+                .unwrap();
+
+        let deserialized = deserialize_relay_keys(&serialized).unwrap();
+
+        assert_eq!(deserialized.len(), 2);
+
+        // Family key entry
+        assert_eq!(deserialized[0].i, usize::MAX);
+        assert_eq!(deserialized[0].t, Ed25519KeyType::FamilyId);
+        assert_eq!(deserialized[0].ed, vec![0xFF; 64]);
+        assert!(deserialized[0].p.is_empty());
+        assert!(deserialized[0].q.is_empty());
+
+        // Relay key entry
+        assert_eq!(deserialized[1].i, 1);
+        assert_eq!(deserialized[1].t, Ed25519KeyType::Type0);
+        assert_eq!(deserialized[1].ed, vec![0x11; 64]);
     }
 
     #[test]
@@ -893,6 +1008,7 @@ mod tests {
             ed: vec![0x11; 64],
             p: vec![0x22; 64],
             q: vec![0x33; 64],
+            t: Ed25519KeyType::FamilyId,
         };
 
         let relay_data2 = RelayKeyData {
@@ -900,6 +1016,7 @@ mod tests {
             ed: vec![0xAA; 64],
             p: vec![0xBB; 64],
             q: vec![0xCC; 64],
+            t: Ed25519KeyType::FamilyId,
         };
 
         let serialized =
@@ -936,6 +1053,7 @@ mod tests {
             ed: vec![0xAB; 64],
             p: primes[0].to_bytes_be(),
             q: primes[1].to_bytes_be(),
+            t: Ed25519KeyType::Type0,
         };
 
         let serialized = bincode::encode_to_vec(&relay_data, bincode::config::standard()).unwrap();
@@ -969,6 +1087,33 @@ mod tests {
             serialized_four.len() < 2048,
             "Ten relays too large: {}",
             serialized_four.len()
+        );
+    }
+
+    #[test]
+    fn test_family_key_header_roundtrip() {
+        let mut original = Vec::new();
+        original.extend_from_slice(TOR_FAMILY_KEY_HEADER);
+        original.extend_from_slice(&[0xAB; 64]);
+
+        let stripped = strip_family_key_header(&original).unwrap();
+        let restored = add_ed25519_header(&stripped, &Ed25519KeyType::FamilyId).unwrap();
+
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn test_ed25519_key_type_from_header() {
+        assert_eq!(
+            Ed25519KeyType::from_header(TOR_ED25519_HEADER).unwrap(),
+            Ed25519KeyType::Type0
+        );
+        assert_eq!(
+            Ed25519KeyType::from_header(TOR_FAMILY_KEY_HEADER).unwrap(),
+            Ed25519KeyType::FamilyId
+        );
+        assert!(
+            Ed25519KeyType::from_header(b"invalid header padding here!!!\x00\x00\x00").is_err()
         );
     }
 }

@@ -35,7 +35,7 @@ sysinfo = { version = "0.37", features = ["serde"] }
 systemctl = "0.5.0"
 tar = "0.4.44"
 tokio = { version = "1.48", features = ["full"] }
-tss-esapi = { git = "https://github.com/gibix/rust-tss-esapi", branch = "baloo/make-credentials", features = ["rustcrypto", "integration-tests", "serde", "abstraction", "p256"] }
+tss-esapi = { git = "https://github.com/baloo/rust-tss-esapi", branch = "baloo/make-credentials", features = ["rustcrypto", "integration-tests", "serde", "abstraction", "p256"] }
 [build-dependencies]
 const-gen = "1.6.8"
 
