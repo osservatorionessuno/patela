@@ -14,3 +14,4 @@ elliptic-curve = { git = "https://github.com/RustCrypto/traits.git" }
 primefield = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
 p256       = { git = "https://github.com/RustCrypto/elliptic-curves.git" }
 ecdsa      = { git = "https://github.com/RustCrypto/signatures.git" }
+cfb-mode = { git = "https://github.com/RustCrypto/block-modes.git" }

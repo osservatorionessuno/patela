@@ -33,7 +33,7 @@ sqlx = { version = "0.8.6", features = ["sqlite", "migrate", "runtime-tokio"] }
 sysinfo = { version = "0.37", features = ["serde"] }
 thiserror = "2.0.17"
 tokio = { version = "1.48", features = ["full"] }
-tss-esapi = { git = "https://github.com/gibix/rust-tss-esapi", branch = "baloo/make-credentials", features = ["rustcrypto", "integration-tests", "serde", "abstraction", "p256"] }
+tss-esapi = { git = "https://github.com/baloo/rust-tss-esapi", branch = "baloo/make-credentials", features = ["rustcrypto", "integration-tests", "serde", "abstraction", "p256", "aes"] }
 x509-parser = "0.18.0"
 
 [dev-dependencies]
